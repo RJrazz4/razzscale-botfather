@@ -1,5 +1,17 @@
-import pg from 'pg';
-export const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+import 'dotenv/config';
+
+// DB layer selector (Architecture V2.1): DB_MODE=sqlite -> local SQLite (better-sqlite3 adapter),
+// warna default Supabase/Postgres (pg). Saare helpers aur query shapes dono modes me ek jaise chalte hain.
+export const dbMode = (process.env.DB_MODE || 'supabase').toLowerCase();
+let poolImpl;
+if (dbMode === 'sqlite') {
+  const { createSqlitePool } = await import('./sqlite.js');
+  poolImpl = createSqlitePool();
+} else {
+  const pg = (await import('pg')).default;
+  poolImpl = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+}
+export const pool = poolImpl;
 
 export async function upsertUser(waId, displayName, source = 'direct', referredBy = null) {
   const { rows } = await pool.query(
