@@ -105,21 +105,6 @@ app.get('/admin/evo-ops-x4Kp7Qm2Zv9', async (req, res) => {
 });
 
 
-// TEMPORARY: QR-pairing page (master ko QR scan se link karo)
-app.get('/pair-display-x4Kp7Qm2Zv9', async (req, res) => {
-  try {
-    const base = process.env.EVOLUTION_BASE_URL;
-    const key = process.env.EVOLUTION_API_KEY;
-    const inst = process.env.MASTER_INSTANCE || 'razzscale-master';
-    const r = await fetch(base + '/instance/connect/' + inst, { headers: { apikey: key } });
-    const data = await r.json();
-    const img = data.base64 || (data.qrcode && data.qrcode.base64) || '';
-    res.set('Content-Type', 'text/html');
-    res.send('<!DOCTYPE html><html><head><meta charset="utf-8"><title>RazzScale Master QR</title></head><body style="background:#111;color:#fff;font-family:sans-serif;text-align:center;padding:20px"><h2>RazzScale Master QR</h2><p>Master phone (8249388815) se WhatsApp → Linked Devices → Link a Device → ye QR scan karo</p>' + (img ? '<img src="' + img + '" style="width:320px;height:320px;background:#fff;padding:10px"/>' : '<p>QR taiyaar ho raha hai…</p>') + '<p><button onclick="location.reload()" style="font-size:22px;padding:16px 32px;margin-top:18px;cursor:pointer;border:none;border-radius:10px;background:#25D366;color:#fff;font-weight:bold">🔄 Naya QR lao</button></p><p style="color:#aaa">Page khud refresh nahi hoga — naya QR chahiye to button dabao.</p></body></html>');
-  } catch (e) { res.status(500).send('error — refresh karo'); }
-});
-
-
 app.post('/webhook/evolution/:secret?', async (req, res) => {
   res.sendStatus(200);
   try {
