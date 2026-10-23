@@ -3,18 +3,29 @@ import { env } from './config/env.js';
 import { handleEvolutionWebhook } from './handlers/sessionRouter.js';
 import { sweepZombies } from './services/spawner.js';
 import * as evo from './services/evolution.js';
-import { pool } from './db/pool.js';
+import { pool, dbMode } from './db/pool.js';
+import { prepareDatabase } from './db/sqlite.js';
+import * as telegram from './services/telegram.js';
+import { startWorker } from './services/worker.js';
 
 
 // Bootstrap: deploy ke baad master instance khud ban jayega (koi manual API call nahi)
+// + webhook self-heal (V2.1): instance pehle se ho tab bhi webhook dobara set karo —
+// recreate ke baad webhook udd jane wali purani dikkat ka ilaaj. Non-fatal.
 async function bootstrapMaster() {
   try {
+    const secret = process.env.MASTER_WEBHOOK_SECRET || 'master-secret';
+    const webhookUrl = process.env.PUBLIC_BASE_URL ? `${process.env.PUBLIC_BASE_URL}/webhook/evolution/${secret}` : null;
     const list = await evo.fetchInstances();
     const names = (Array.isArray(list) ? list : []).map(i => i.name || i.instance?.instanceName);
     if (!names.includes(env.masterInstance)) {
-      const secret = process.env.MASTER_WEBHOOK_SECRET || 'master-secret';
-      await evo.createInstance(env.masterInstance, `${process.env.PUBLIC_BASE_URL}/webhook/evolution/${secret}`, secret);
-      console.log('[bootstrap] master instance created');
+      if (webhookUrl) {
+        await evo.createInstance(env.masterInstance, webhookUrl, secret);
+        console.log('[bootstrap] master instance created');
+      }
+    } else if (webhookUrl) {
+      await evo.setInstanceWebhook(env.masterInstance, webhookUrl).catch(e => console.error('[bootstrap] webhook self-heal:', e?.message || e));
+      console.log('[bootstrap] master webhook re-armed');
     }
   } catch (e) { console.error('[bootstrap]', e?.message || e); }
 }
@@ -110,7 +121,6 @@ app.get('/admin/evo-ops-x4Kp7Qm2Zv9', async (req, res) => {
   res.json({ ok: true, results: out });
 });
 
-
 app.post('/webhook/evolution/:secret?', async (req, res) => {
   res.sendStatus(200);
   try {
@@ -121,8 +131,17 @@ app.post('/webhook/evolution/:secret?', async (req, res) => {
 });
 
 
-// Zombie session sweeper — har 2 min
-setInterval(() => { sweepZombies().then(n => { if (n) console.log(`[sweeper] ${n} zombie sessions failed`); }).catch(() => {}); }, 120_000);
-
-
-app.listen(env.port, () => { console.log(`RazzScale BotFather listening on :${env.port}`); bootstrapMaster(); });
+async function start() {
+  // SQLite mode: pehle vault se DB restore (agar local file missing hai), phir hi kuch aur
+  if (dbMode === 'sqlite') {
+    await prepareDatabase((p) => telegram.restoreDbFile(p)).catch(() => {});
+  }
+  // Zombie session sweeper — har 2 min
+  setInterval(() => { sweepZombies().then(n => { if (n) console.log(`[sweeper] ${n} zombie sessions failed`); }).catch(() => {}); }, 120_000);
+  // Jobs worker (music download / AI chat — async)
+  startWorker();
+  // DB backup — har 30 min (vault na ho to no-op)
+  setInterval(() => { telegram.backupDatabase().catch(() => {}); }, 30 * 60_000);
+  app.listen(env.port, () => { console.log(`RazzScale BotFather listening on :${env.port}`); bootstrapMaster(); });
+}
+start();
