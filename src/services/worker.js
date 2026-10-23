@@ -6,7 +6,7 @@ import { freeChat } from './llm.js';
 
 // Async Worker (Architecture V2.1, plan §3): heavy kaam (music download, AI chat) webhook handler
 // se bahar, SQLite jobs table ke peeche. Idempotency: ek idempotency_key wala kaam do baar nahi bhejta.
-const TIMEOUTS = { music_download: 240_000, ai_chat: 120_000 };
+const TIMEOUTS = { music_download: 240_000, ai_chat: 120_000, lyrics: 30_000 };
 const MAX_ATTEMPTS = 2;
 let timer = null;
 let ticking = false;
@@ -45,17 +45,60 @@ async function finish(job, ok, result) {
   }
 }
 
+// Lyrics ke liye YouTube title ki safai: "|" ke baad ka hissa, [..]/(..) wale hisse aur
+// Official/Video/Lyrical jaise shabd hatao; phir '—'/'-' par todo — pehla hissa artist, baki gaana.
+function parseTrackQuery(rawTitle = '') {
+  let s = String(rawTitle).split('|')[0];
+  s = s.replace(/\[[^\]]*\]/g, ' ').replace(/\([^)]*\)/g, ' ');
+  s = s.replace(/\b(official|lyrical|lyrics|video|audio|full|hd|4k)\b/gi, ' ');
+  s = s.replace(/\s+/g, ' ').trim();
+  const parts = s.split(/\s*[—–-]\s*/).filter(Boolean);
+  if (parts.length >= 2) return { artist: parts[0], song: parts.slice(1).join(' - ') };
+  return { artist: '', song: s };
+}
+
+async function fetchLyrics(artist, title) {
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), 8_000); // 8s timeout
+  try {
+    const res = await fetch(`https://api.lyrics.ovh/v1/${encodeURIComponent(artist)}/${encodeURIComponent(title)}`, { signal: ctrl.signal });
+    if (!res.ok) return null;
+    const j = await res.json().catch(() => null);
+    return (j?.lyrics || '').trim() || null;
+  } catch { return null; } finally { clearTimeout(to); }
+}
+
 function withTimeout(promise, ms) {
   return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('job_timeout')), ms))]);
 }
 
 const EXECUTORS = {
-  // Music: vault/disk/cold se audio lao aur WhatsApp par bhejo (purana user-visible flow bilkul waisa)
+  // Music: vault/disk/cold se audio lao aur WhatsApp par bhejo.
+  // Footer rule: audio delivery = footer ON (caption me); uske baad lyrics-wali chhoti line (bina footer).
   async music_download(p) {
     const file = await getAudioForVideo(p.videoId, p.title);
     const b64 = fs.readFileSync(file).toString('base64');
-    await evo.sendMedia(p.instance, p.to, b64, p.title, 'audio');
+    await evo.sendMedia(p.instance, p.to, b64, p.title, 'audio', { footer: true });
+    await evo.sendText(p.instance, p.to, "Lyrics chahiye to 'lyrics' likh do 🎵").catch(() => {});
     if (p.userId) await logUsage(p.userId, 'music').catch(() => {});
+  },
+  // Lyrics: last-played gaane ke bol lyrics.ovh (free) se — na mile to saaf mana kar do.
+  async lyrics(p) {
+    const { artist, song } = parseTrackQuery(p.title);
+    let lyr = null;
+    if (artist && song) lyr = await fetchLyrics(artist, song);
+    if (!lyr && song) lyr = await fetchLyrics('', song); // artist bina, sirf title se ek try
+    if (!lyr) { await evo.sendText(p.instance, p.to, 'Is gaane ke lyrics nahi mile 😔'); return; }
+    // Max ~3000 chars, line-boundary par ~1500 ke tukde, zyada se zyada 2 messages (bina footer)
+    const chunks = [];
+    let cur = '';
+    for (const line of lyr.slice(0, 3000).split('\n')) {
+      if (cur && (cur.length + line.length + 1) > 1500) { chunks.push(cur); cur = line; if (chunks.length === 2) break; }
+      else cur = cur ? `${cur}\n${line}` : line;
+    }
+    if (cur && chunks.length < 2) chunks.push(cur);
+    for (const c of chunks.slice(0, 2)) await evo.sendText(p.instance, p.to, c);
+    if (p.userId) await logUsage(p.userId, 'lyrics').catch(() => {});
   },
   async ai_chat(p) {
     const reply = await freeChat({ id: p.userId }, p.text);
@@ -65,6 +108,7 @@ const EXECUTORS = {
 
 const FAILURE_TEXT = {
   music_download: { type: 'text', text: 'Ye gaana download nahi ho paya 😔 — "menu" likh kar koi aur gaana try karo.' },
+  lyrics: { type: 'text', text: 'Is gaane ke lyrics nahi mile 😔' },
 };
 
 async function tick() {
