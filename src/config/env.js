@@ -12,6 +12,12 @@ export const env = {
   llmModel: process.env.FREE_LLM_MODEL || 'google/gemma-3-27b-it:free',
   ytdlp: process.env.YTDLP_BIN || 'yt-dlp',
   musicTmp: process.env.MUSIC_TMP_DIR || '/tmp/razz-music',
+  ffmpeg: process.env.FFMPEG_BIN || 'ffmpeg',
+  // Architecture V2.1 — DB + Telegram Vault
+  dbMode: (process.env.DB_MODE || 'supabase').toLowerCase(), // 'sqlite' | 'supabase'
+  sqlitePath: process.env.SQLITE_PATH || './data/botfather.db',
+  telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || '', // sirf env se — kabhi log/print nahi
+  telegramVaultChatId: process.env.TELEGRAM_VAULT_CHAT_ID || '',
 };
 
 // global_config cache (30s) — ENABLE_PAYWALL yahi se padha jata hai
