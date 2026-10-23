@@ -3,9 +3,11 @@ import { promisify } from 'node:util';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import ffmpegStatic from 'ffmpeg-static';
 import { env } from '../config/env.js';
 import { pool } from '../db/pool.js';
 const run = promisify(execFile);
+const FFMPEG = process.env.FFMPEG_BIN || ffmpegStatic || 'ffmpeg';
 
 export async function searchTop3(query) {
   const hash = crypto.createHash('sha256').update(query.toLowerCase().trim()).digest('hex');
@@ -23,18 +25,32 @@ async function dlGate() { if (dlActive >= 3) await new Promise(r => dlQueue.push
 function dlDone() { dlActive--; const n = dlQueue.shift(); if (n) n(); }
 export async function downloadAudio(videoId) {
   fs.mkdirSync(env.musicTmp, { recursive: true });
-  const existing = fs.readdirSync(env.musicTmp).find(f => f.startsWith(videoId + '.'));
-  if (existing) return path.join(env.musicTmp, existing);
+  const m4a = path.join(env.musicTmp, `${videoId}.m4a`);
+  if (fs.existsSync(m4a)) return m4a;
   await dlGate();
-  try { return await _downloadAudio(videoId); } finally { dlDone(); }
+  try { return await _downloadAudio(videoId, m4a); } finally { dlDone(); }
 }
-async function _downloadAudio(videoId) {
-  await run(env.ytdlp, ['-f', 'bestaudio[ext=m4a]/bestaudio', '--no-warnings', '-o', path.join(env.musicTmp, '%(id)s.%(ext)s'), `https://www.youtube.com/watch?v=${videoId}`],
-    { timeout: 180_000, maxBuffer: 4 * 1024 * 1024 });
-  const actual = fs.readdirSync(env.musicTmp).find(f => f.startsWith(videoId + '.'));
-  if (!actual) throw new Error('download_failed');
-  const file = path.join(env.musicTmp, actual);
-  const size = fs.statSync(file).size;
-  if (size > 16 * 1024 * 1024) throw new Error('audio_too_large');
-  return file;
+async function _downloadAudio(videoId, m4aPath) {
+  const srcPath = path.join(env.musicTmp, `${videoId}.src.mp4`);
+  try {
+    await run(env.ytdlp, ['-f', '18/best[height<=360]/best', '--no-warnings',
+      '--extractor-args', 'youtube:player_client=android',
+      '-o', srcPath, `https://www.youtube.com/watch?v=${videoId}`],
+      { timeout: 180_000, maxBuffer: 4 * 1024 * 1024 });
+  } catch (e) {
+    console.error('[music] ytdlp failed:', String(e.stderr || e.message || '').slice(0, 500));
+    throw new Error('download_failed');
+  }
+  try {
+    await run(FFMPEG, ['-y', '-i', srcPath, '-vn', '-c:a', 'copy', m4aPath],
+      { timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
+  } catch (e) {
+    console.error('[music] ffmpeg failed:', String(e.stderr || e.message || '').slice(0, 500));
+    throw new Error('convert_failed');
+  } finally {
+    try { fs.unlinkSync(srcPath); } catch {}
+  }
+  if (!fs.existsSync(m4aPath)) throw new Error('download_failed');
+  if (fs.statSync(m4aPath).size > 16 * 1024 * 1024) throw new Error('audio_too_large');
+  return m4aPath;
 }
