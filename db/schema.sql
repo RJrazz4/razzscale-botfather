@@ -108,3 +108,52 @@ create table if not exists active_ads (
 insert into active_ads (text, link_url, priority) values
   ('🚀 Pro Feature: Apne bot se Bulk Messages + Auto Lead Generation chalao — VIP Tools menu me dekho!', null, 10)
 on conflict do nothing;
+
+-- ============ Architecture V2.1 tables (SQLite mode canonical hai; pg fallback ke liye yaha bhi) ============
+-- Telegram media vault: gaana ek baar fetch -> file_id yaha, dobara yt-dlp nahi
+create table if not exists media_vault (
+  video_id   text primary key,
+  title      text,
+  file_id    text not null,
+  message_id bigint,
+  size       bigint,
+  created_at timestamptz not null default now()
+);
+-- Async jobs (router/worker) — idempotency_key unique: ek kaam do baar nahi bhejta
+create table if not exists jobs (
+  id              bigserial primary key,
+  type            text not null,
+  payload         jsonb,
+  status          text not null default 'pending',
+  attempts        int not null default 0,
+  idempotency_key text unique,
+  result          text,
+  created_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now()
+);
+create index if not exists idx_jobs_status on jobs(status, id);
+-- Manual chat auto-pause (owner master number se khud likhe to us contact ke liye bot band)
+create table if not exists paused_contacts (
+  jid       text primary key,
+  paused_at timestamptz not null default now(),
+  reason    text
+);
+-- Bot ke bheje messages ki registry (fromMe pehchan: bot ka send vs owner ka manual)
+create table if not exists sent_registry (
+  message_id   text primary key,
+  instance_name text,
+  jid          text,
+  sent_at      timestamptz not null default now()
+);
+-- Webhook dedup (redelivered message do baar process nahi)
+create table if not exists processed_messages (
+  id text primary key,
+  ts timestamptz not null default now()
+);
+-- Ad daily cap ginoti (per contact per day; footer cap se bahar hai)
+create table if not exists ad_impressions (
+  jid   text not null,
+  day   date not null,
+  count int not null default 0,
+  primary key (jid, day)
+);
