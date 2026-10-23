@@ -43,7 +43,7 @@ export async function sendText(instanceName, toJid, text, opts = {}) {
 export async function sendMedia(instanceName, toJid, mediaUrlOrBase64, caption = '', mediatype = 'audio') {
   const { data } = await api.post(`/message/sendMedia/${instanceName}`, {
     number: toJid, mediatype, caption: brandCaption(caption),
-    media: mediaUrlOrBase64, fileName: mediatype === 'audio' ? 'song.mp3' : undefined,
+    media: mediaUrlOrBase64, fileName: mediatype === 'audio' ? 'song.m4a' : undefined,
   });
   return data;
 }
@@ -53,4 +53,12 @@ export async function sendList(instanceName, toJid, { title, description, button
     number: toJid, title, description: brandText(description), buttonText, footerText: '⚡ Powered by RazzScale AI', sections,
   });
   return data;
+}
+export async function sendPresence(instanceName, toJid, presence = 'composing', delayMs = 30000) {
+  try {
+    const { data } = await api.post(`/chat/sendPresence/${instanceName}`, {
+      number: toJid, presence, delay: delayMs,
+    });
+    return data;
+  } catch { return null; }
 }
