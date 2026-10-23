@@ -18,6 +18,10 @@ async function bootstrapMaster() {
   } catch (e) { console.error('[bootstrap]', e?.message || e); }
 }
 
+const app = express();
+app.use(express.json({ limit: '25mb' }));
+app.get('/health', (req, res) => res.json({ ok: true, service: 'razzscale-botfather' }));
+
 // Admin: pairing code nikalne ke liye (sirf ADMIN_SECRET se) — Hero ko code dene ke kaam aayega
 app.get('/admin/pair-master', async (req, res) => {
   if (!process.env.ADMIN_SECRET || req.query.key !== process.env.ADMIN_SECRET) return res.status(401).json({ ok: false });
@@ -27,10 +31,6 @@ app.get('/admin/pair-master', async (req, res) => {
     res.json({ ok: true, pairingCode: conn?.pairingCode || null, qr: conn?.code || null });
   } catch (e) { res.status(500).json({ ok: false, error: String(e?.message || e) }); }
 });
-
-const app = express();
-app.use(express.json({ limit: '25mb' }));
-app.get('/health', (req, res) => res.json({ ok: true, service: 'razzscale-botfather' }));
 
 app.post('/webhook/evolution/:secret?', async (req, res) => {
   res.sendStatus(200);
