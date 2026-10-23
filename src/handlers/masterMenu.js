@@ -2,7 +2,7 @@ import * as evo from '../services/evolution.js';
 import { env } from '../config/env.js';
 import { setFlow, getFlow, logUsage } from '../db/pool.js';
 import { spawnSubBot } from '../services/spawner.js';
-import { searchTop3 } from '../services/music.js';
+import { searchSongs } from '../services/music.js';
 import { enqueueJob } from '../services/worker.js';
 import { vipMenuText, vipPitchText, VIP_FEATURES } from './vip.js';
 
@@ -36,23 +36,68 @@ Namaste! 🙏 Main aapka apna WhatsApp dost hoon — bot banana, gaane sunna, AI
 ━━━━━━━━━━━━━━━
 📞 *Seedha baat karni ho to:* +91 72051 91890`;
 
+// --- Music results helpers (KDMusic-style: 8 results, 3-3 ke pages, tappable list + number fallback) ---
+const MUSIC_PAGE = 3;
+function musicPageText(results, fromIdx, toIdx) {
+  const lines = results.slice(fromIdx, toIdx).map((r, i) => `${fromIdx + i + 1}. ${r.title}`).join('\n');
+  const moreLine = toIdx < results.length ? '\nAur results ke liye "more" likho 👇' : '';
+  return `${fromIdx === 0 ? 'Top results:' : 'Aur results:'}\n\n${lines}\n\nNumber likho (1-${toIdx}) — audio bhej dunga.${moreLine}`;
+}
+function musicListRows(results, shown) {
+  const rows = results.slice(0, shown).map((r, i) => ({
+    rowId: String(i + 1), // global index — sessionRouter list-reply ko isi se pick banata hai
+    title: (r.title || 'Gaana').length > 45 ? `${r.title.slice(0, 45)}…` : (r.title || 'Gaana'),
+    description: r.duration ? `${Math.floor(r.duration / 60)}:${String(r.duration % 60).padStart(2, '0')}` : undefined,
+  }));
+  if (results.length > shown) rows.push({ rowId: 'more', title: '➕ More tracks', description: 'Aur results dekho' });
+  return rows;
+}
+async function sendMusicList(inst, from, results, shown) {
+  // List sirf sajawat hai — fail ho to chup-chaap ignore, text flow hi main hai.
+  await evo.sendList(inst, from, {
+    title: '🎵 Top Results', buttonText: 'Gaana Chuno',
+    description: 'Tap karke gaana chuno — ya number likh do 👇',
+    sections: [{ title: 'Results', rows: musicListRows(results, shown) }],
+  }).catch(() => {});
+}
+
 export async function handleMasterMessage({ user, from, text, pushName, msgId }) {
   const inst = env.masterInstance;
   const t = (text || '').trim();
   const flow = await getFlow(user.id, 'master');
   const state = flow?.step || 'menu';
 
-  // Music selection state (top-3 me se chuna) — download+send ab WORKER ke paas (V2.1):
+  // Music selection state — download+send WORKER ke paas (V2.1):
   // handler sirf ack deta hai, bhaari kaam queue me; idempotency key = WhatsApp message id.
-  if (state === 'music_pick' && ['1', '2', '3'].includes(t)) {
-    const pick = flow.results[Number(t) - 1];
-    await setFlow(user.id, 'master', { step: 'menu' });
-    await evo.sendText(inst, from, `"${pick.title}" bhej raha hoon, ek minute…`);
-    await evo.sendPresence(inst, from, 'recording', 55000);
-    await enqueueJob('music_download',
-      { instance: inst, to: from, userId: user.id, videoId: pick.id, title: pick.title },
-      `music:${msgId || `${user.id}:${pick.id}:${Date.now()}`}`);
-    return;
+  // Pick: dikhaye hue (shown) results me se koi bhi number — text se ya list-tap se (rowId = wahi number).
+  // 'more'/'aur': agla page (3 aur). List wala 'more' row bhi text 'more' bankar yahi aata hai.
+  if (state === 'music_pick') {
+    const results = flow.results || [];
+    const shown = flow.shown || Math.min(MUSIC_PAGE, results.length);
+    if (['more', 'aur'].includes(t.toLowerCase())) {
+      if (shown >= results.length) {
+        await evo.sendText(inst, from, 'Bas itne hi results mile is gaane ke 🙏 — number likho ya "menu" likho.');
+      } else {
+        const newShown = Math.min(shown + MUSIC_PAGE, results.length);
+        await setFlow(user.id, 'master', { step: 'music_pick', results, shown: newShown, query: flow.query, lastTitle: flow.lastTitle });
+        await evo.sendText(inst, from, musicPageText(results, shown, newShown));
+        await sendMusicList(inst, from, results, newShown);
+      }
+      return;
+    }
+    const n = Number(t);
+    if (Number.isInteger(n) && n >= 1 && n <= shown && results[n - 1]) {
+      const pick = results[n - 1];
+      // lastTitle yaad rakho — gaana bajne ke baad 'lyrics' isi se kaam karega
+      await setFlow(user.id, 'master', { step: 'menu', lastTitle: pick.title });
+      await evo.sendText(inst, from, `"${pick.title}" bhej raha hoon, ek minute…`);
+      await evo.sendPresence(inst, from, 'recording', 55000);
+      await enqueueJob('music_download',
+        { instance: inst, to: from, userId: user.id, videoId: pick.id, title: pick.title },
+        `music:${msgId || `${user.id}:${pick.id}:${Date.now()}`}`);
+      return;
+    }
+    // number/more nahi hai to neeche ke flows (menu aadi) ko mauka do — return mat karo
   }
   // VIP pick: koi bhi advanced feature chuna → pitch + personal WhatsApp deep link
   if (state === 'vip_pick' && ['1','2','3','4','5'].includes(t)) {
@@ -109,7 +154,7 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId })
   if (['hi', 'hii', 'hello', 'hey', 'menu', 'start', 'namaste'].includes(lower) || t === '') {
     await evo.sendList(inst, from, {
       title: 'RazzScale AI BotFather', buttonText: 'Menu Dekho',
-      description: MENU_TEXT,
+      description: MENU_TEXT, footer: true, // menu = footer ON (rule)
       sections: [{ title: 'Options', rows: [
         { rowId: '1', title: 'Create Your Own Bot', description: 'Support / AI / Music / Lead Gen — FREE' },
         { rowId: '2', title: 'Music Bot', description: 'Gaane ka naam → audio' },
@@ -117,7 +162,7 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId })
         { rowId: '4', title: 'Image Generation', description: 'Meta AI par redirect' },
         { rowId: '5', title: '🚀 Advanced Automation & VIP Tools', description: 'Bulk Msg, Lead Gen, Order System, White-Label' },
       ] }],
-    }).catch(async () => { await evo.sendText(inst, from, MENU_TEXT); });
+    }).catch(async () => { await evo.sendText(inst, from, MENU_TEXT, { footer: true }); });
     // kuch clients list ko text me badal kar bhejte hain — text fallback hamesha saath
     if (!lower) return;
     return;
@@ -128,18 +173,27 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId })
     return;
   }
   if (t === '2') {
-    await setFlow(user.id, 'master', { step: 'music_query' });
-    await evo.sendText(inst, from, 'Gaane ka naam bhejo — main top 3 results dunga.');
+    await setFlow(user.id, 'master', { step: 'music_query', lastTitle: flow?.lastTitle });
+    await evo.sendText(inst, from, 'Gaane ka naam bhejo — main top results dunga.');
+    return;
+  }
+  // Lyrics: gaana bajne ke baad (menu state, lastTitle yaad hai) user 'lyrics' likhe to worker se bol mangwao
+  if (lower === 'lyrics' && state === 'menu' && flow?.lastTitle) {
+    await enqueueJob('lyrics',
+      { instance: inst, to: from, userId: user.id, title: flow.lastTitle },
+      `lyrics:${msgId || `${user.id}:${Date.now()}`}`);
     return;
   }
   if (state === 'music_query' && t) {
     await evo.sendText(inst, from, `🔍 *${t}* dhoondh raha hoon… bas ek minute, yahi raho 🎧`);
     await evo.sendPresence(inst, from, 'composing', 55000);
     let results = [];
-    try { results = await searchTop3(t); } catch { results = []; }
+    try { results = await searchSongs(t, 8); } catch { results = []; }
     if (!results.length) { await evo.sendText(inst, from, 'Ye gaana abhi nahi mil paya 😔 — naam thoda alag likh kar phir bhejo, ya koi aur gaana try karo.'); return; }
-    await setFlow(user.id, 'master', { step: 'music_pick', results });
-    await evo.sendText(inst, from, `Top results:\n\n${results.map((r, i) => `${i + 1}. ${r.title}`).join('\n')}\n\nNumber likho (1/2/3) — audio bhej dunga.`);
+    const shown = Math.min(MUSIC_PAGE, results.length);
+    await setFlow(user.id, 'master', { step: 'music_pick', results, shown, query: t, lastTitle: flow?.lastTitle });
+    await evo.sendText(inst, from, musicPageText(results, 0, shown));
+    await sendMusicList(inst, from, results, shown);
     return;
   }
   if (t === '3') {
@@ -165,6 +219,6 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId })
     await evo.sendText(inst, from, `Image banane ke liye Meta AI (official) par jao — wahan best quality milegi:\n${META_AI_LINK}\n\nWapas aakar "menu" likhna, aur bhi kaam hai.`);
     return;
   }
-  // Default: menu dobara
-  await evo.sendText(inst, from, MENU_TEXT);
+  // Default: menu dobara (menu = footer ON)
+  await evo.sendText(inst, from, MENU_TEXT, { footer: true });
 }
