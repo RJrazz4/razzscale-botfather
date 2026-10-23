@@ -10,17 +10,23 @@ import * as telegram from './telegram.js';
 const run = promisify(execFile);
 const FFMPEG = process.env.FFMPEG_BIN || ffmpegStatic || 'ffmpeg';
 
-// yt-dlp: top-3 search (flat) + chune hue gaane ka audio download.
-export async function searchTop3(query) {
-  const hash = crypto.createHash('sha256').update(query.toLowerCase().trim()).digest('hex');
+// yt-dlp search (flat) + chune hue gaane ka audio download.
+// KDMusic-style UX (2026-10-24): master bot ab top 8 lata hai (pages of 3 + "more").
+// Cache key me limit shamil hai taaki 3-wali aur 8-wali khoj ek dusre ko na kaatein.
+export async function searchSongs(query, limit = 8) {
+  const hash = crypto.createHash('sha256').update(`${limit}:${query.toLowerCase().trim()}`).digest('hex');
   const { rows } = await pool.query('select results from music_cache where query_hash=$1', [hash]);
   if (rows[0]) return rows[0].results;
-  const { stdout } = await run(env.ytdlp, ['-J', '--flat-playlist', '--no-warnings', `ytsearch3:${query}`], { timeout: 45_000, maxBuffer: 8 * 1024 * 1024 });
+  const { stdout } = await run(env.ytdlp, ['-J', '--flat-playlist', '--no-warnings', `ytsearch${limit}:${query}`], { timeout: 45_000, maxBuffer: 8 * 1024 * 1024 });
   const json = JSON.parse(stdout);
-  const results = (json.entries || []).slice(0, 3).map(e => ({ id: e.id, title: e.title, duration: e.duration || null, url: `https://www.youtube.com/watch?v=${e.id}` }));
+  const results = (json.entries || []).slice(0, limit).map(e => ({ id: e.id, title: e.title, duration: e.duration || null, url: `https://www.youtube.com/watch?v=${e.id}` }));
   await pool.query('insert into music_cache (query_hash, query_text, results) values ($1,$2,$3) on conflict do nothing',
     [hash, query, JSON.stringify(results)]);
   return results;
+}
+// Back-compat: sub-bots (bots/index.js) abhi bhi top-3 wale naam se bulate hain.
+export async function searchTop3(query) {
+  return searchSongs(query, 3);
 }
 
 // Downloads EK baar me sirf 1 (V2.1, plan §3 fix #5 — free-tier RAM par 3 = OOM risk)
