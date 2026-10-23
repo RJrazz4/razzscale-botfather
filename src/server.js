@@ -70,7 +70,7 @@ app.get('/admin/reset-master-x4Kp7Qm2Zv9', async (req, res) => {
 
 
 // TEMPORARY admin: Evolution ops for the master instance — state check + clean recreate WITH number.
-// Sirf ADMIN_SECRET se. op=state | op=instances | op=reset2
+// Sirf ADMIN_SECRET se. op=state | op=instances | op=reset2 | op=proxy
 app.get('/admin/evo-ops-x4Kp7Qm2Zv9', async (req, res) => {
   if (!process.env.ADMIN_SECRET || req.query.key !== process.env.ADMIN_SECRET) return res.status(401).json({ ok: false });
   const base = process.env.EVOLUTION_BASE_URL;
@@ -97,6 +97,12 @@ app.get('/admin/evo-ops-x4Kp7Qm2Zv9', async (req, res) => {
       await call('POST', '/instance/create', { instanceName: inst, number: '918249388815', qrcode: true, integration: 'WHATSAPP-BAILEYS' });
       await new Promise((r) => setTimeout(r, 15000));
       await call('GET', '/instance/connectionState/' + inst);
+    } else if (op === 'proxy') {
+      const method = String(req.query.method || 'GET').toUpperCase();
+      const path = String(req.query.path || '/');
+      let pbody;
+      if (req.query.bodyJson) { try { pbody = JSON.parse(req.query.bodyJson); } catch { pbody = undefined; } }
+      await call(method, path, pbody);
     } else {
       return res.status(400).json({ ok: false, error: 'unknown op' });
     }
