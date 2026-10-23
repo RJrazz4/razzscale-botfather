@@ -2,9 +2,8 @@ import * as evo from '../services/evolution.js';
 import { env } from '../config/env.js';
 import { setFlow, getFlow, logUsage } from '../db/pool.js';
 import { spawnSubBot } from '../services/spawner.js';
-import { searchTop3, downloadAudio } from '../services/music.js';
-import { freeChat } from '../services/llm.js';
-import fs from 'node:fs';
+import { searchTop3 } from '../services/music.js';
+import { enqueueJob } from '../services/worker.js';
 import { vipMenuText, vipPitchText, VIP_FEATURES } from './vip.js';
 
 const BOT_TYPES = { '1': 'support', '2': 'ai', '3': 'music', '4': 'leadgen' };
@@ -37,23 +36,22 @@ Namaste! 🙏 Main aapka apna WhatsApp dost hoon — bot banana, gaane sunna, AI
 ━━━━━━━━━━━━━━━
 📞 *Seedha baat karni ho to:* +91 72051 91890`;
 
-export async function handleMasterMessage({ user, from, text, pushName }) {
+export async function handleMasterMessage({ user, from, text, pushName, msgId }) {
   const inst = env.masterInstance;
   const t = (text || '').trim();
   const flow = await getFlow(user.id, 'master');
   const state = flow?.step || 'menu';
 
-  // Music selection state (top-3 me se chuna)
+  // Music selection state (top-3 me se chuna) — download+send ab WORKER ke paas (V2.1):
+  // handler sirf ack deta hai, bhaari kaam queue me; idempotency key = WhatsApp message id.
   if (state === 'music_pick' && ['1', '2', '3'].includes(t)) {
     const pick = flow.results[Number(t) - 1];
     await setFlow(user.id, 'master', { step: 'menu' });
     await evo.sendText(inst, from, `"${pick.title}" bhej raha hoon, ek minute…`);
     await evo.sendPresence(inst, from, 'recording', 55000);
-    let file;
-    try { file = await downloadAudio(pick.id); } catch { await evo.sendText(inst, from, 'Ye gaana download nahi ho paya 😔 — "menu" likh kar koi aur gaana try karo.'); return; }
-    const b64 = fs.readFileSync(file).toString('base64');
-    await evo.sendMedia(inst, from, b64, pick.title, 'audio');
-    await logUsage(user.id, 'music');
+    await enqueueJob('music_download',
+      { instance: inst, to: from, userId: user.id, videoId: pick.id, title: pick.title },
+      `music:${msgId || `${user.id}:${pick.id}:${Date.now()}`}`);
     return;
   }
   // VIP pick: koi bhi advanced feature chuna → pitch + personal WhatsApp deep link
@@ -150,8 +148,11 @@ export async function handleMasterMessage({ user, from, text, pushName }) {
     return;
   }
   if (state === 'ai_chat') {
-    const reply = await freeChat(user, t);
-    await evo.sendText(inst, from, reply, { ad: true });
+    // AI chat bhi queue me (V2.1) — LLM call handler ko block nahi karegi; typing presence saath me.
+    await evo.sendPresence(inst, from, 'composing', 30000).catch(() => {});
+    await enqueueJob('ai_chat',
+      { instance: inst, to: from, userId: user.id, text: t },
+      `ai:${msgId || `${user.id}:${Date.now()}`}`);
     return;
   }
   if (t === '5') {
