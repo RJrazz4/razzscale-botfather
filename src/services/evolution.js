@@ -56,28 +56,30 @@ async function recordSent(instanceName, toJid, data) {
   } catch { /* registry fail ho to send flow kabhi na ruke */ }
 }
 
-// ---------- Sending (SAB branded — koi raw send nahi) ----------
+// ---------- Sending ----------
+// Footer discipline (2026-10-24): footer DEFAULT band; sirf opts.footer === true par lagega
+// (menu sends + music delivery). Ad block (opts.ad) footer se alag hai — jaisa tha waisa.
 export async function sendText(instanceName, toJid, text, opts = {}) {
   let finalText = text;
   if (opts.ad) { const ad = await getAdForJid(toJid).catch(() => null); finalText = text + adBlock(ad); }
   const { data } = await api.post(`/message/sendText/${instanceName}`, {
-    number: toJid, text: brandText(finalText), delay: 400, linkPreview: false,
+    number: toJid, text: brandText(finalText, opts.footer === true), delay: 400, linkPreview: false,
   });
   await recordSent(instanceName, toJid, data);
   return data;
 }
-export async function sendMedia(instanceName, toJid, mediaUrlOrBase64, caption = '', mediatype = 'audio') {
+export async function sendMedia(instanceName, toJid, mediaUrlOrBase64, caption = '', mediatype = 'audio', opts = {}) {
   const { data } = await api.post(`/message/sendMedia/${instanceName}`, {
-    number: toJid, mediatype, caption: brandCaption(caption),
+    number: toJid, mediatype, caption: brandCaption(caption, opts.footer === true),
     media: mediaUrlOrBase64, fileName: mediatype === 'audio' ? 'song.m4a' : undefined,
   });
   await recordSent(instanceName, toJid, data);
   return data;
 }
 // Interactive list — client support patchy hai; caller hamesha text fallback saath bhejega.
-export async function sendList(instanceName, toJid, { title, description, buttonText, sections }) {
+export async function sendList(instanceName, toJid, { title, description, buttonText, sections, footer = false }) {
   const { data } = await api.post(`/message/sendList/${instanceName}`, {
-    number: toJid, title, description: brandText(description), buttonText, footerText: '⚡ Powered by RazzScale AI', sections,
+    number: toJid, title, description: brandText(description, footer === true), buttonText, footerText: '⚡ Powered by RazzScale AI', sections,
   });
   await recordSent(instanceName, toJid, data);
   return data;
