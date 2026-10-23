@@ -48,7 +48,9 @@ export async function handleMasterMessage({ user, from, text, pushName }) {
     const pick = flow.results[Number(t) - 1];
     await setFlow(user.id, 'master', { step: 'menu' });
     await evo.sendText(inst, from, `"${pick.title}" bhej raha hoon, ek minute…`);
-    const file = await downloadAudio(pick.id);
+    await evo.sendPresence(inst, from, 'recording', 55000);
+    let file;
+    try { file = await downloadAudio(pick.id); } catch { await evo.sendText(inst, from, 'Ye gaana download nahi ho paya 😔 — "menu" likh kar koi aur gaana try karo.'); return; }
     const b64 = fs.readFileSync(file).toString('base64');
     await evo.sendMedia(inst, from, b64, pick.title, 'audio');
     await logUsage(user.id, 'music');
@@ -133,8 +135,11 @@ export async function handleMasterMessage({ user, from, text, pushName }) {
     return;
   }
   if (state === 'music_query' && t) {
-    const results = await searchTop3(t);
-    if (!results.length) { await evo.sendText(inst, from, 'Ye gaana nahi mila. Naam phir se bhejo.'); return; }
+    await evo.sendText(inst, from, `🔍 *${t}* dhoondh raha hoon… bas ek minute, yahi raho 🎧`);
+    await evo.sendPresence(inst, from, 'composing', 55000);
+    let results = [];
+    try { results = await searchTop3(t); } catch { results = []; }
+    if (!results.length) { await evo.sendText(inst, from, 'Ye gaana abhi nahi mil paya 😔 — naam thoda alag likh kar phir bhejo, ya koi aur gaana try karo.'); return; }
     await setFlow(user.id, 'master', { step: 'music_pick', results });
     await evo.sendText(inst, from, `Top results:\n\n${results.map((r, i) => `${i + 1}. ${r.title}`).join('\n')}\n\nNumber likho (1/2/3) — audio bhej dunga.`);
     return;
