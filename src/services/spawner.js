@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { pool } from '../db/pool.js';
 import { env, getConfig } from '../config/env.js';
 import * as evo from './evolution.js';
+import { backupNow } from './telegram.js';
 
 export const BOT_GREETINGS = {
   support:  'Namaste! Main aapka Support Bot hoon. Apna sawaal likhiye, main turant jawab dunga.',
@@ -42,6 +43,7 @@ export async function spawnSubBot({ user, botType, ownerPhone }) {
     await evo.createInstance(instanceName, webhookUrl, webhookSecret);
     const conn = await evo.connectPairing(instanceName, ownerPhone);
     await pool.query(`update sessions set status='awaiting_pair' where id=$1`, [session.id]);
+    backupNow().catch(() => {}); // critical write (naya sub-bot) — turant DB backup, fire-and-forget (V2.1)
     return { ok: true, session, pairingCode: conn?.pairingCode || null, qr: conn?.code || conn?.qrcode?.base64 || null };
   } catch (e) {
     await client.query('rollback').catch(() => {});
