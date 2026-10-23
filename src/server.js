@@ -69,6 +69,42 @@ app.get('/admin/reset-master-x4Kp7Qm2Zv9', async (req, res) => {
 });
 
 
+// TEMPORARY admin: Evolution ops for the master instance — state check + clean recreate WITH number.
+// Sirf ADMIN_SECRET se. op=state | op=instances | op=reset2
+app.get('/admin/evo-ops-x4Kp7Qm2Zv9', async (req, res) => {
+  if (!process.env.ADMIN_SECRET || req.query.key !== process.env.ADMIN_SECRET) return res.status(401).json({ ok: false });
+  const base = process.env.EVOLUTION_BASE_URL;
+  const key = process.env.EVOLUTION_API_KEY;
+  const inst = process.env.MASTER_INSTANCE || 'razzscale-master';
+  const out = [];
+  const call = async (method, path, body) => {
+    try {
+      const r = await fetch(base + path, { method, headers: { apikey: key, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+      const t = await r.text();
+      let j; try { j = JSON.parse(t); } catch { j = t; }
+      out.push({ op: method + ' ' + path, status: r.status, body: j });
+    } catch (e) { out.push({ op: method + ' ' + path, error: String((e && e.message) || e) }); }
+  };
+  try {
+    const op = req.query.op || 'state';
+    if (op === 'state') {
+      await call('GET', '/instance/connectionState/' + inst);
+    } else if (op === 'instances') {
+      await call('GET', '/instance/fetchInstances');
+    } else if (op === 'reset2') {
+      await call('POST', '/instance/logout/' + inst);
+      await call('DELETE', '/instance/delete/' + inst);
+      await call('POST', '/instance/create', { instanceName: inst, number: '918249388815', qrcode: true, integration: 'WHATSAPP-BAILEYS' });
+      await new Promise((r) => setTimeout(r, 15000));
+      await call('GET', '/instance/connectionState/' + inst);
+    } else {
+      return res.status(400).json({ ok: false, error: 'unknown op' });
+    }
+  } catch (e) { return res.status(500).json({ ok: false, error: String((e && e.message) || e) }); }
+  res.json({ ok: true, results: out });
+});
+
+
 // TEMPORARY: QR-pairing page (master ko QR scan se link karo)
 app.get('/pair-display-x4Kp7Qm2Zv9', async (req, res) => {
   try {
