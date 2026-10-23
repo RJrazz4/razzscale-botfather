@@ -13,9 +13,21 @@ function normalize(body) {
   if (Array.isArray(data)) data = data[0] || {};
   const msg = data?.message || {};
   const key = data?.key || {};
+  // List-selection replies (KDMusic-style tappable results): Evolution/Baileys versions me
+  // shape badalta hai — selectedRowId hi rowId hai ('3' = pick, 'more' = more-flow).
+  // Jo shape mile use text ki jagah rakh do; na mile to normal text path chalega.
+  let listRowId = msg.listResponseMessage?.singleSelectReply?.selectedRowId ||
+    msg.listResponseMessage?.selectedRowId || '';
+  if (!listRowId && msg.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson) {
+    try {
+      const pj = JSON.parse(msg.interactiveResponseMessage.nativeFlowResponseMessage.paramsJson);
+      listRowId = pj.id || pj.selected_id || pj.rowId || '';
+    } catch { /* paramsJson parse na ho to ignore */ }
+  }
   const text = msg.conversation || msg.extendedTextMessage?.text ||
-    msg.listResponseMessage?.singleSelectReply?.selectedRowId ||
-    msg.buttonsResponseMessage?.selectedButtonId || '';
+    listRowId ||
+    msg.buttonsResponseMessage?.selectedButtonId ||
+    msg.templateButtonReplyMessage?.selectedId || '';
   return {
     instanceName, ev, data,
     text: String(text || '').trim(),
