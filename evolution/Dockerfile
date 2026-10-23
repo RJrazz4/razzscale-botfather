@@ -1,0 +1,3 @@
+FROM atendai/evolution-api:v2.2.3
+ENV SERVER_PORT=7860
+EXPOSE 7860
