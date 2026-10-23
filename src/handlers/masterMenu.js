@@ -11,15 +11,31 @@ const BOT_TYPES = { '1': 'support', '2': 'ai', '3': 'music', '4': 'leadgen' };
 const BOT_LABELS = { support: 'Auto-Reply / Support Bot', ai: 'AI Assistant Bot', music: 'Music Bot', leadgen: 'Lead Gen Bot' };
 const META_AI_LINK = 'https://wa.me/13135550069?text=Create%20an%20image'; // Meta AI official chat (placeholder number pattern — deploy par verify karna)
 
-const MENU_TEXT = `Namaste! Main *RazzScale AI BotFather* hoon. Kya karna hai, number likho:
+const MENU_TEXT = `╭━━━ ❖ ━━━╮
+   🤖 *RAZZSCALE AI BOTFATHER*
+╰━━━ ❖ ━━━╯
 
-1. *Create Your Own Bot* — apna WhatsApp bot banao (FREE)
-2. *Music Bot* — gaane ka naam bhejo, audio le lo
-3. *Free AI Chat* — mujhse kuch bhi pucho
-4. *Image Banana Hai* — Meta AI par bhej dunga
-5. *🚀 Advanced Automation & VIP Tools* — bade businesses ke liye
+Namaste! 🙏 Main aapka apna WhatsApp dost hoon — bot banana, gaane sunna, AI se baat karna… sab kuch *bilkul FREE* me!
 
-Bas number likho: 1, 2, 3, 4 ya 5`;
+👇 *Bas number likho, kaam shuru:*
+
+1️⃣ *Create Your Own Bot* 🤖
+      Apna khud ka WhatsApp bot banao — FREE
+
+2️⃣ *Music Bot* 🎵
+      Gaane ka naam bhejo, audio haath me
+
+3️⃣ *Free AI Chat* 💬
+      Mujhse kuch bhi pucho, jawab milega
+
+4️⃣ *Image Banana Hai* 🎨
+      Meta AI se photo banwao
+
+5️⃣ *Advanced Automation & VIP Tools* 🚀
+      Bade businesses ke liye khaas
+
+━━━━━━━━━━━━━━━
+📞 *Seedha baat karni ho to:* +91 72051 91890`;
 
 export async function handleMasterMessage({ user, from, text, pushName }) {
   const inst = env.masterInstance;
