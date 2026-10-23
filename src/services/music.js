@@ -7,7 +7,6 @@ import { env } from '../config/env.js';
 import { pool } from '../db/pool.js';
 const run = promisify(execFile);
 
-// yt-dlp: top-3 search (flat) + chune hue gaane ka audio download (mp3, chhota size)
 export async function searchTop3(query) {
   const hash = crypto.createHash('sha256').update(query.toLowerCase().trim()).digest('hex');
   const { rows } = await pool.query('select results from music_cache where query_hash=$1', [hash]);
@@ -24,15 +23,18 @@ async function dlGate() { if (dlActive >= 3) await new Promise(r => dlQueue.push
 function dlDone() { dlActive--; const n = dlQueue.shift(); if (n) n(); }
 export async function downloadAudio(videoId) {
   fs.mkdirSync(env.musicTmp, { recursive: true });
-  const out = path.join(env.musicTmp, `${videoId}.mp3`);
-  if (fs.existsSync(out)) return out;
+  const existing = fs.readdirSync(env.musicTmp).find(f => f.startsWith(videoId + '.'));
+  if (existing) return path.join(env.musicTmp, existing);
   await dlGate();
-  try { return await _downloadAudio(videoId, out); } finally { dlDone(); }
+  try { return await _downloadAudio(videoId); } finally { dlDone(); }
 }
-async function _downloadAudio(videoId, out) {
-  await run(env.ytdlp, ['-x', '--audio-format', 'mp3', '--audio-quality', '5', '--no-warnings', '-o', path.join(env.musicTmp, '%(id)s.%(ext)s'), `https://www.youtube.com/watch?v=${videoId}`],
+async function _downloadAudio(videoId) {
+  await run(env.ytdlp, ['-f', 'bestaudio[ext=m4a]/bestaudio', '--no-warnings', '-o', path.join(env.musicTmp, '%(id)s.%(ext)s'), `https://www.youtube.com/watch?v=${videoId}`],
     { timeout: 180_000, maxBuffer: 4 * 1024 * 1024 });
-  const size = fs.statSync(out).size;
-  if (size > 16 * 1024 * 1024) throw new Error('audio_too_large'); // WhatsApp media cap
-  return out;
+  const actual = fs.readdirSync(env.musicTmp).find(f => f.startsWith(videoId + '.'));
+  if (!actual) throw new Error('download_failed');
+  const file = path.join(env.musicTmp, actual);
+  const size = fs.statSync(file).size;
+  if (size > 16 * 1024 * 1024) throw new Error('audio_too_large');
+  return file;
 }
