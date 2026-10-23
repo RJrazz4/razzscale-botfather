@@ -36,7 +36,7 @@ export async function sendText(instanceName, toJid, text, opts = {}) {
   let finalText = text;
   if (opts.ad) { const ad = await getActiveAd().catch(() => null); finalText = text + adBlock(ad); }
   const { data } = await api.post(`/message/sendText/${instanceName}`, {
-    number: toJid, text: brandText(finalText), delay: 400, linkPreview: true,
+    number: toJid, text: brandText(finalText), delay: 400, linkPreview: false,
   });
   return data;
 }
