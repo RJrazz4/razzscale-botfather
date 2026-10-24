@@ -157,3 +157,12 @@ create table if not exists ad_impressions (
   count int not null default 0,
   primary key (jid, day)
 );
+-- VIP consultation leads (FRONTEND BRIEF): confirm par ek row; id = Lead ID (RS-<base36>)
+create table if not exists leads (
+  id         text primary key,
+  jid        text,
+  user_id    text,
+  service    text,
+  answers    jsonb,
+  created_at timestamptz not null default now()
+);
