@@ -160,6 +160,39 @@ ok(env.masterWaLink.includes('918249388815'), 'env.masterWaLink master bot numbe
 // Master Instruction (AI chat ki rooh) ke andar Boss wali line ab bhi personal number par hai.
 ok(MASTER_INSTRUCTION.includes('72051 91890'), 'FLAG barkarar: instruction ke andar Boss line me personal number hai (Hero ka faisla pending)');
 
+// ---------- 11. FAST MUSIC v2 (2026-10-24): seedha JioSaavn source ----------
+const js = await import(path.join(ROOT, 'src/services/jiosaavn.js'));
+// Decryption test vector — probe 2026-10-24 ka ASAL gaana (Tum Hi Ho, aRZbUYD7):
+// encrypted_media_url -> yahi CDN URL banna chahiye (quality suffix ke bina base hisaa)
+const TV_ENC = 'ID2ieOjCrwfgWvL5sXl4B1ImC5QfbsDyRofh8YQPTqjR2tIxTYXqGEQHgqnNfsetouo4rsD0s4RZKObWAyHrEhw7tS9a8Gtq';
+const tvUrl = js.decryptMediaUrl(TV_ENC);
+ok(tvUrl === 'https://aac.saavncdn.com/430/5c5ea5cc00e3bff45616013226f376fe_96.mp4', 'jiosaavn decrypt: test vector se asal CDN URL banta hai');
+ok(js.decryptMediaUrl('garbage!!!') === null && js.decryptMediaUrl('') === null, 'jiosaavn decrypt: kharab input par null (guess nahi)');
+ok(js.withQuality(tvUrl, 320).endsWith('_320.mp4') && js.withQuality(tvUrl, 160).endsWith('_160.mp4'), 'jiosaavn quality swap: _320/_160 suffix sahi banta hai');
+ok(js.preferredUrl(tvUrl, { '320kbps': 'true' }).endsWith('_320.mp4'), 'jiosaavn preferredUrl: 320kbps flag par 320');
+ok(js.preferredUrl(tvUrl, { '320kbps': 'false' }).endsWith('_160.mp4'), 'jiosaavn preferredUrl: flag na ho to 160');
+// Cache faisle (pure): URL 45 min ke andar 'use', purana ho to 'refresh'; metadata 24h
+const NOW = Date.parse('2026-10-24T10:00:00.000Z');
+const freshRow = { download_url: 'https://x/_160.mp4', url_fetched_at: new Date(NOW - 10 * 60_000).toISOString(), updated_at: new Date(NOW - 3600_000).toISOString() };
+const staleUrlRow = { ...freshRow, url_fetched_at: new Date(NOW - 50 * 60_000).toISOString() };
+const staleMetaRow = { ...freshRow, updated_at: new Date(NOW - 25 * 3600_000).toISOString() };
+ok(js.decideUrlAction(freshRow, NOW) === 'use', 'saavn cache: 10 min purana URL = use');
+ok(js.decideUrlAction(staleUrlRow, NOW) === 'refresh', 'saavn cache: 50 min purana URL = refresh (time-limited URL wali samajhdari)');
+ok(js.decideUrlAction(null, NOW) === 'refresh' && js.decideUrlAction({}, NOW) === 'refresh', 'saavn cache: row/URL na ho to refresh');
+ok(js.isMetaFresh(freshRow, NOW) === true && js.isMetaFresh(staleMetaRow, NOW) === false, 'saavn cache: metadata TTL 24h sahi');
+// mapSong shape — masterMenu UI (title/duration) + lyrics parser (Artist — Song) dono ke hisaab se
+const mapped = js.mapSong({ id: 'abc123', song: 'Tum Hi Ho', singers: 'Arijit Singh', duration: '262', image: 'https://c.saavncdn.com/x/150x150.jpg', perma_url: 'https://www.jiosaavn.com/song/x' });
+ok(mapped.source === 'jiosaavn' && mapped.id === 'abc123' && mapped.duration === 262 && mapped.durationSec === 262, 'mapSong: source/id/duration sahi');
+ok(mapped.title === 'Arijit Singh — Tum Hi Ho' && mapped.image.includes('500x500'), 'mapSong: title Artist — Song + image 500x500');
+// Source routing (source-pattern checks)
+ok(/searchSongsSaavn\(query, 8\)/.test(masterSrc) && /searchSongs\(query, 8\)/.test(masterSrc), 'masterMenu: pehle saavn search, fallback YT search — dono wired');
+ok(/source: pick\.source/.test(masterSrc) && /songId:/.test(masterSrc), 'masterMenu: pick payload me source + songId jata hai');
+ok(/deliverSaavnTrack/.test(workerSrc) && /p\.source === 'jiosaavn'/.test(workerSrc), 'worker: jiosaavn picks par saavn delivery chain');
+ok(/saavn:/.test(workerSrc) && /getFreshUrl/.test(workerSrc), 'worker: vault key saavn:<id> + getFreshUrl use hota hai');
+ok(/create table if not exists saavn_cache/.test(src('src/db/sqlite.js')), 'sqlite schema me saavn_cache table hai');
+ok(/create table if not exists saavn_cache/.test(src('db/schema.sql')), 'pg schema.sql me saavn_cache table hai');
+ok(/startTrendingPrecache/.test(src('src/server.js')), 'server.js boot par trending pre-cache hook hai');
+
 // temp test DB saaf karo
 for (const suf of ['', '-wal', '-shm']) { try { fs.rmSync(TEST_DB + suf, { force: true }); } catch { /* ignore */ } }
 
