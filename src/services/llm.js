@@ -1,5 +1,6 @@
 import { env, getConfig } from '../config/env.js';
 import { usageToday, logUsage } from '../db/pool.js';
+import { MASTER_INSTRUCTION } from '../config/instruction.js';
 
 let keyIdx = 0;
 export async function freeChat(user, prompt, history = []) {
@@ -15,7 +16,7 @@ export async function freeChat(user, prompt, history = []) {
     body: JSON.stringify({
       model: env.llmModel,
       messages: [
-        { role: 'system', content: 'Tum RazzScale AI ke friendly assistant ho. Chhota, saaf jawab do. User ki bhasha (Hindi/English/Hinglish) me jawab do.' },
+        { role: 'system', content: MASTER_INSTRUCTION },
         ...history.slice(-6), { role: 'user', content: prompt },
       ],
     }),
