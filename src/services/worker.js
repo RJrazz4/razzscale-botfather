@@ -74,12 +74,26 @@ function withTimeout(promise, ms) {
 
 const EXECUTORS = {
   // Music: vault/disk/cold se audio lao aur WhatsApp par bhejo.
-  // Footer rule: audio delivery = footer ON (caption me); uske baad lyrics-wali chhoti line (bina footer).
+  // Footer rule: audio delivery = footer ON (caption me).
+  // TAP-FIRST (KDMusic-style): delivery ke turant baad ACTION LIST — user ko kuch type nahi karna.
+  // RowIds masterMenu me text bankar handle hote hain: 'lyrics' → lyrics keyword branch,
+  // 'music_new' → TAP_MAP se '2', 'menu' → menu keyword branch. List fail ho to purani text line fallback.
   async music_download(p) {
     const file = await getAudioForVideo(p.videoId, p.title);
     const b64 = fs.readFileSync(file).toString('base64');
     await evo.sendMedia(p.instance, p.to, b64, p.title, 'audio', { footer: true });
-    await evo.sendText(p.instance, p.to, "Lyrics chahiye to 'lyrics' likh do 🎵").catch(() => {});
+    const actionList = await evo.sendList(p.instance, p.to, {
+      title: '🎵 Gaana mil gaya!', buttonText: 'Options Dekho',
+      description: 'Ab kya karna hai? Ek option tap karo 👇',
+      sections: [{ title: 'Gaane ke options', rows: [
+        { rowId: 'lyrics', title: '🔤 Is gaane ke Lyrics', description: 'Isi gaane ke bol dekho' },
+        { rowId: 'music_new', title: '🔍 Naya gaana khojo', description: 'Koi aur gaana sunna hai' },
+        { rowId: 'menu', title: '🏠 Menu par wapas', description: 'Saari services dekho' },
+      ] }],
+    }).catch(() => null);
+    if (!actionList) {
+      await evo.sendText(p.instance, p.to, "Lyrics chahiye to 'lyrics' likh do 🎵").catch(() => {});
+    }
     if (p.userId) await logUsage(p.userId, 'music').catch(() => {});
   },
   // Lyrics: last-played gaane ke bol lyrics.ovh (free) se — na mile to saaf mana kar do.
