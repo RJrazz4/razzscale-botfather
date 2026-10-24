@@ -1,7 +1,11 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import { pool, logUsage, getFlow, setFlow } from '../db/pool.js';
+import { env } from '../config/env.js';
 import * as evo from './evolution.js';
-import { getAudioForVideo } from './music.js';
+import * as telegram from './telegram.js';
+import { getAudioForVideo, searchSongs } from './music.js';
+import { getFreshUrl, withQuality } from './jiosaavn.js';
 import { freeChat } from './llm.js';
 
 // Async Worker (Architecture V2.1, plan §3): heavy kaam (music download, AI chat) webhook handler
@@ -97,6 +101,131 @@ async function sendMusicActionList(instance, to, ok) {
   return Boolean(sent);
 }
 
+// ---------- FAST MUSIC v2: JioSaavn delivery chain ----------
+// Order pakka hai: (1) VAULT — repeat gaana sabse fast (Telegram file_id se disk par),
+// (2) fresh URL DIRECT send — Evolution khud CDN se fetch karta hai, disk zero,
+// (3) buffer download karke send (+ gaana vault me, agli baar step 1 se milega),
+// (4) LAST FALLBACK — purana yt-dlp pipeline (title se YT khoj). Koi kadam fail ho
+// to agla kadam; sab fail hon to hi job fail hota hai.
+const WHATSAPP_MAX = 16 * 1024 * 1024; // WhatsApp media cap (music.js se ek)
+
+async function sendAudioFile(p, file) {
+  const b64 = fs.readFileSync(file).toString('base64');
+  await evo.sendMedia(p.instance, p.to, b64, p.title, 'audio', { footer: true });
+}
+// Vault save: key 'saavn:<songId>' — YT video IDs se takraav nahi. Background pattern
+// (music.js jaisa): user ka jawab is par nahi rukta.
+function vaultSaveSaavn(vaultId, file, title) {
+  if (!telegram.vaultEnabled() || !fs.existsSync(file)) return;
+  telegram.uploadFile(env.telegramVaultChatId, file, vaultId)
+    .then(async (up) => {
+      if (up?.file_id) {
+        await pool.query(
+          `insert into media_vault (video_id, title, file_id, message_id, size) values ($1,$2,$3,$4,$5)
+           on conflict (video_id) do update set file_id=excluded.file_id, message_id=excluded.message_id, size=excluded.size`,
+          [vaultId, title || null, up.file_id, up.message_id, fs.statSync(file).size]).catch(() => {});
+      }
+    })
+    .catch(() => {});
+}
+async function headSize(url) {
+  try {
+    const ctrl = new AbortController(); const to = setTimeout(() => ctrl.abort(), 8_000);
+    const res = await fetch(url, { method: 'HEAD', signal: ctrl.signal });
+    clearTimeout(to);
+    const len = Number(res.headers.get('content-length'));
+    return res.ok && Number.isFinite(len) && len > 0 ? len : null;
+  } catch { return null; }
+}
+async function fetchBuffer(url) {
+  const ctrl = new AbortController(); const to = setTimeout(() => ctrl.abort(), 60_000);
+  try {
+    const res = await fetch(url, { signal: ctrl.signal });
+    if (!res.ok) throw new Error(`cdn_http_${res.status}`);
+    return Buffer.from(await res.arrayBuffer());
+  } finally { clearTimeout(to); }
+}
+// Quality ki utarti seedhi: jo URL mila wahi, phir 160, phir 96
+function qualityLadder(url) {
+  const out = [url];
+  for (const kb of [160, 96]) {
+    const v = withQuality(url, kb);
+    if (v && !out.includes(v)) out.push(v);
+  }
+  return out;
+}
+
+async function deliverSaavnTrack(p) {
+  const vaultId = `saavn:${p.songId}`;
+  fs.mkdirSync(env.musicTmp, { recursive: true });
+  const localFile = path.join(env.musicTmp, `saavn-${p.songId}.m4a`);
+  // (1) VAULT pehle — repeat gaana yahin se sabse tez aata hai
+  if (telegram.vaultEnabled()) {
+    const { rows } = await pool.query('select * from media_vault where video_id=$1', [vaultId]).catch(() => ({ rows: [] }));
+    if (rows[0]?.file_id) {
+      const ok = await telegram.downloadByFileId(rows[0].file_id, localFile);
+      if (ok && fs.existsSync(localFile) && fs.statSync(localFile).size <= WHATSAPP_MAX) {
+        await evo.sendPresence(p.instance, p.to, 'recording', 30000).catch(() => {});
+        await sendAudioFile(p, localFile);
+        return;
+      }
+      // Dead file_id — saaf karke aage badho (music.js wala hi usool)
+      await pool.query('delete from media_vault where video_id=$1', [vaultId]).catch(() => {});
+    }
+  }
+  // (2)+(3) fresh URL se delivery — koi bhi gadbad ho to delivered=false, step 4 chalega
+  let delivered = false;
+  try {
+    const { url } = await getFreshUrl(p.songId);
+    let sendUrl = url;
+    // 320kbps ka lamba gaana 16MB cap tod sakta hai — HEAD se size dekh lo,
+    // bada ho to pehle se quality gira kar bhejo (fail-retry se tez hai)
+    const size = await headSize(url);
+    if (size && size > WHATSAPP_MAX) {
+      for (const kb of [160, 96]) {
+        const v = withQuality(url, kb);
+        const s2 = await headSize(v);
+        sendUrl = v;
+        if (!s2 || s2 <= WHATSAPP_MAX) break;
+      }
+    }
+    await evo.sendPresence(p.instance, p.to, 'recording', 30000).catch(() => {});
+    try {
+      // (2) DIRECT URL send — disk par kuch save nahi hota
+      await evo.sendMedia(p.instance, p.to, sendUrl, p.title, 'audio', { footer: true });
+      delivered = true;
+      // Vault ke liye background download — user is par nahi rukta
+      fetchBuffer(sendUrl).then((buf) => {
+        if (buf.length && buf.length <= WHATSAPP_MAX) { fs.writeFileSync(localFile, buf); vaultSaveSaavn(vaultId, localFile, p.title); }
+      }).catch(() => {});
+    } catch { /* (3) buffer path */ }
+    if (!delivered) {
+      for (const v of qualityLadder(sendUrl)) {
+        try {
+          const buf = await fetchBuffer(v);
+          if (buf.length && buf.length <= WHATSAPP_MAX) {
+            fs.writeFileSync(localFile, buf);
+            await sendAudioFile(p, localFile);
+            vaultSaveSaavn(vaultId, localFile, p.title);
+            delivered = true;
+            break;
+          }
+        } catch { /* agli quality try karo */ }
+      }
+    }
+  } catch { /* fresh URL hi nahi mila — step 4 */ }
+  if (delivered) return;
+  // (4) LAST FALLBACK: purana yt-dlp pipeline (gaane ke title se YT khoj)
+  const yt = await searchSongs(p.title, 1).catch(() => []);
+  if (yt[0]?.id) {
+    const file = await getAudioForVideo(yt[0].id, p.title);
+    await evo.sendPresence(p.instance, p.to, 'recording', 30000).catch(() => {});
+    await sendAudioFile(p, file);
+    return;
+  }
+  throw new Error('saavn_delivery_failed');
+}
+
 const EXECUTORS = {
   // Music: vault/disk/cold se audio lao aur WhatsApp par bhejo.
   // Footer rule: audio delivery = footer ON (caption me).
@@ -110,10 +239,22 @@ const EXECUTORS = {
     // (sendPresence andar hi errors swallow karta hai, upar se .catch bhi hai).
     await evo.sendPresence(p.instance, p.to, 'composing', 20000).catch(() => {});
     try {
-      const file = await getAudioForVideo(p.videoId, p.title);
-      await evo.sendPresence(p.instance, p.to, 'recording', 30000).catch(() => {});
-      const b64 = fs.readFileSync(file).toString('base64');
-      await evo.sendMedia(p.instance, p.to, b64, p.title, 'audio', { footer: true });
+      if (p.source === 'jiosaavn' && p.songId) {
+        // FAST MUSIC v2 chain (upar deliverSaavnTrack): vault -> URL -> buffer -> yt-dlp
+        try {
+          await deliverSaavnTrack(p);
+        } catch (e) {
+          // Failure-text ke liye payload saaf: saavn ID se YouTube link banana DEAD
+          // link hoga — tick wala sendMusicFailure phir bina-link wala text chunega.
+          p.url = undefined; p.videoId = null;
+          throw e;
+        }
+      } else {
+        const file = await getAudioForVideo(p.videoId, p.title);
+        await evo.sendPresence(p.instance, p.to, 'recording', 30000).catch(() => {});
+        const b64 = fs.readFileSync(file).toString('base64');
+        await evo.sendMedia(p.instance, p.to, b64, p.title, 'audio', { footer: true });
+      }
       // Delivery ho gayi — busy guard hatao, ab post-audio taps (lyrics/music_new) khulenge
       await moveBusyState(p.userId, p.videoId, { step: 'music_done', lastTitle: p.title });
       const actionList = await sendMusicActionList(p.instance, p.to, true);
