@@ -76,10 +76,25 @@ export async function sendMedia(instanceName, toJid, mediaUrlOrBase64, caption =
   await recordSent(instanceName, toJid, data);
   return data;
 }
+// WhatsApp list limits (research 2026-10-24): row title ≤24 chars, row description ≤72 chars —
+// isse zyada par WhatsApp list bigaad/reject kar sakta hai. Har caller ke rows yahi guzrenge.
+export function clampListTitle(s, max = 24) {
+  const str = String(s ?? '');
+  return str.length > max ? `${str.slice(0, max - 1)}…` : str;
+}
+export function clampListDesc(s, max = 72) {
+  const str = String(s ?? '');
+  return str.length > max ? `${str.slice(0, max - 1)}…` : str;
+}
 // Interactive list — client support patchy hai; caller hamesha text fallback saath bhejega.
+// Safety net: sections/rows ki titles+descriptions WhatsApp limits par clamp karke bhejo.
 export async function sendList(instanceName, toJid, { title, description, buttonText, sections, footer = false }) {
+  const safeSections = (sections || []).map((sec) => ({
+    ...sec,
+    rows: (sec.rows || []).map((r) => ({ ...r, title: clampListTitle(r.title), description: r.description ? clampListDesc(r.description) : r.description })),
+  }));
   const { data } = await api.post(`/message/sendList/${instanceName}`, {
-    number: toJid, title, description: brandText(description, footer === true), buttonText, footerText: '⚡ Powered by RazzScale AI', sections,
+    number: toJid, title, description: brandText(description, footer === true), buttonText, footerText: '⚡ Powered by RazzScale AI', sections: safeSections,
   });
   await recordSent(instanceName, toJid, data);
   return data;
