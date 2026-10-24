@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 
@@ -99,11 +100,51 @@ create view if not exists subbots as select * from sessions;
 create view if not exists settings as select key, value, updated_at from global_config;
 `;
 
+// File asal SQLite DB hai ya nahi — (a) pehle 16 bytes ka magic header "SQLite format 3\0",
+// (b) temp copy ko better-sqlite3 se khol kar PRAGMA integrity_check. Dono pass hon tabhi true.
+// Temp copy par jaanch isliye: original file (jo live DB ya restore candidate ho sakti hai)
+// validation se mutate nahi hoti, aur WAL wali file bhi sahi judge hoti hai.
+export function validateSqliteFile(filePath) {
+  try {
+    if (!fs.existsSync(filePath) || fs.statSync(filePath).size < 16) return false;
+    const fd = fs.openSync(filePath, 'r');
+    const head = Buffer.alloc(16);
+    fs.readSync(fd, head, 0, 16, 0);
+    fs.closeSync(fd);
+    if (head.toString('latin1') !== 'SQLite format 3\0') return false;
+    const tmp = path.join(os.tmpdir(), `validate-${process.pid}-${Date.now()}.db`);
+    try {
+      fs.copyFileSync(filePath, tmp);
+      if (fs.existsSync(filePath + '-wal')) fs.copyFileSync(filePath + '-wal', tmp + '-wal');
+      const tdb = new Database(tmp);
+      try { return tdb.pragma('integrity_check', { simple: true }) === 'ok'; }
+      finally { tdb.close(); }
+    } finally {
+      for (const f of [tmp, tmp + '-wal', tmp + '-shm', tmp + '-journal']) {
+        try { fs.unlinkSync(f); } catch { /* ignore */ }
+      }
+    }
+  } catch { return false; }
+}
+
 let _db = null;
 export function getDb() {
   if (_db) return _db;
   const dir = path.dirname(path.resolve(sqlitePath));
   fs.mkdirSync(dir, { recursive: true });
+  // Boot self-heal: maujooda local file asal DB na nikle (galat vault restore, aadhi/raw copy)
+  // to use ".corrupt-<ts>" karke alag rakho aur fresh DB banao — "file is not a database" par
+  // har query fail hone ki jagah bot khud sudhar kar boot ho.
+  try {
+    if (fs.existsSync(sqlitePath) && fs.statSync(sqlitePath).size > 0 && !validateSqliteFile(sqlitePath)) {
+      const gone = `${sqlitePath}.corrupt-${Date.now()}`;
+      fs.renameSync(sqlitePath, gone);
+      for (const suf of ['-wal', '-shm']) {
+        try { fs.renameSync(sqlitePath + suf, gone + suf); } catch { /* sidecar na ho to ignore */ }
+      }
+      console.error(`[sqlite] maujooda DB file invalid mili — alag rakhi (${gone}); fresh DB se shuru`);
+    }
+  } catch (e) { console.error('[sqlite] DB self-heal check:', e?.message || e); }
   _db = new Database(sqlitePath);
   _db.pragma('journal_mode = WAL');
   _db.pragma('foreign_keys = ON');
@@ -120,8 +161,16 @@ export async function prepareDatabase(restoreFn) {
     if (fs.existsSync(sqlitePath) && fs.statSync(sqlitePath).size > 0) return false;
     if (!restoreFn) return false;
     const ok = await restoreFn(sqlitePath);
-    if (ok) console.log('[sqlite] DB vault se restore ho gayi');
-    return !!ok;
+    if (!ok) return false;
+    // Restore se aayi file bhi yahin jaanch lo (defense-in-depth — restoreFn khud bhi
+    // validate karta hai): invalid nikle to hata do, boot fresh DB par jayega.
+    if (!validateSqliteFile(sqlitePath)) {
+      try { fs.unlinkSync(sqlitePath); } catch { /* ignore */ }
+      console.error('[sqlite] restore hui file invalid mili — hata di, fresh DB se boot hoga');
+      return false;
+    }
+    console.log('[sqlite] DB vault se restore ho gayi');
+    return true;
   } catch (e) { console.error('[sqlite] prepareDatabase:', e?.message || e); return false; }
 }
 
