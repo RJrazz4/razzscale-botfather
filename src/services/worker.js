@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { pool, logUsage } from '../db/pool.js';
+import { pool, logUsage, getFlow, setFlow } from '../db/pool.js';
 import * as evo from './evolution.js';
 import { getAudioForVideo } from './music.js';
 import { freeChat } from './llm.js';
@@ -72,6 +72,31 @@ function withTimeout(promise, ms) {
   return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('job_timeout')), ms))]);
 }
 
+// Post-audio ACTION LIST (TAP-FIRST) — success par lyrics/music_new/menu wale 3 rows;
+// failure par gaana nahi aaya, isliye lyrics row nahi — sirf music_new/menu.
+// RowIds masterMenu me text bankar handle hote hain ('lyrics' keyword branch,
+// 'music_new'/'mz'/TAP mapping, 'menu' keyword branch, 'nav_menu' global nav).
+// Return: list bheji gayi ya nahi (false par caller text fallback bhejta hai).
+async function sendMusicActionList(instance, to, ok) {
+  const rows = ok
+    ? [
+      { rowId: 'lyrics', title: '🔤 Is gaane ke Lyrics', description: 'Isi gaane ke bol dekho' },
+      { rowId: 'music_new', title: '🔍 Naya gaana khojo', description: 'Koi aur gaana sunna hai' },
+      { rowId: 'menu', title: '🏠 Menu par wapas', description: 'Saari services dekho' },
+    ]
+    : [
+      { rowId: 'music_new', title: '🔍 Naya gaana khojo', description: 'Koi aur gaana try karo' },
+      { rowId: 'menu', title: '🏠 Menu par wapas', description: 'Saari services dekho' },
+    ];
+  const sent = await evo.sendList(instance, to, {
+    title: ok ? '🎵 Gaana mil gaya!' : '🎵 Gaana nahi aaya',
+    buttonText: 'Options Dekho',
+    description: 'Ab kya karna hai? Ek option tap karo 👇',
+    sections: [{ title: 'Gaane ke options', rows }],
+  }).catch(() => null);
+  return Boolean(sent);
+}
+
 const EXECUTORS = {
   // Music: vault/disk/cold se audio lao aur WhatsApp par bhejo.
   // Footer rule: audio delivery = footer ON (caption me).
@@ -82,15 +107,9 @@ const EXECUTORS = {
     const file = await getAudioForVideo(p.videoId, p.title);
     const b64 = fs.readFileSync(file).toString('base64');
     await evo.sendMedia(p.instance, p.to, b64, p.title, 'audio', { footer: true });
-    const actionList = await evo.sendList(p.instance, p.to, {
-      title: '🎵 Gaana mil gaya!', buttonText: 'Options Dekho',
-      description: 'Ab kya karna hai? Ek option tap karo 👇',
-      sections: [{ title: 'Gaane ke options', rows: [
-        { rowId: 'lyrics', title: '🔤 Is gaane ke Lyrics', description: 'Isi gaane ke bol dekho' },
-        { rowId: 'music_new', title: '🔍 Naya gaana khojo', description: 'Koi aur gaana sunna hai' },
-        { rowId: 'menu', title: '🏠 Menu par wapas', description: 'Saari services dekho' },
-      ] }],
-    }).catch(() => null);
+    // Delivery ho gayi — busy guard hatao, ab post-audio taps (lyrics/music_new) khulenge
+    await moveBusyState(p.userId, p.videoId, { step: 'music_done', lastTitle: p.title });
+    const actionList = await sendMusicActionList(p.instance, p.to, true);
     if (!actionList) {
       await evo.sendText(p.instance, p.to, "Lyrics chahiye to 'lyrics' likh do 🎵").catch(() => {});
     }
@@ -121,9 +140,32 @@ const EXECUTORS = {
 };
 
 const FAILURE_TEXT = {
-  music_download: { type: 'text', text: 'Ye gaana download nahi ho paya 😔 — "menu" likh kar koi aur gaana try karo.' },
   lyrics: { type: 'text', text: 'Is gaane ke lyrics nahi mile 😔' },
 };
+// Music fail (FRONTEND BRIEF §3): sirf "fail ho gaya" nahi — usi track ka YouTube link
+// (alternative sunne ka rasta) + action list. Link videoId se banta hai (pick ke time
+// payload me videoId hamesha hota hai; url bhi bheja jata hai, woh mile to wahi use karo).
+async function sendMusicFailure(p) {
+  const link = p.url || (p.videoId ? `https://www.youtube.com/watch?v=${p.videoId}` : null);
+  const text = link
+    ? `Ye gaana download nahi ho paya 😔\nTab tak YouTube par sun lo: ${link}`
+    : 'Ye gaana download nahi ho paya 😔 — koi aur gaana try karo.';
+  await evo.sendText(p.instance, p.to, text).catch(() => {});
+  await sendMusicActionList(p.instance, p.to, false);
+}
+
+// Pick ke baad state 'music_busy' rehta hai (double-pick guard). Delivery/fail par worker
+// use aage badhata hai — PAR sirf tab jab state ab bhi busy ho (user beech me menu par
+// chala gaya ho to use wapas mat kheenchon). masterMenu ke busy guard ka jod yahi hai.
+async function moveBusyState(userId, videoId, next) {
+  if (!userId) return;
+  try {
+    const f = await getFlow(userId, 'master');
+    if (f?.step === 'music_busy' && (!videoId || f.videoId === videoId)) {
+      await setFlow(userId, 'master', next, 1800);
+    }
+  } catch { /* state na badle to guard agle user action par khud saaf ho jayega */ }
+}
 
 async function tick() {
   if (ticking) return;
@@ -141,8 +183,13 @@ async function tick() {
       } catch (e) {
         const lastTry = job.attempts >= MAX_ATTEMPTS;
         await finish(job, false, String(e?.message || e));
-        if (lastTry && FAILURE_TEXT[job.type] && payload.instance && payload.to) {
-          await evo.sendText(payload.instance, payload.to, FAILURE_TEXT[job.type].text).catch(() => {});
+        if (lastTry && payload.instance && payload.to) {
+          if (job.type === 'music_download') {
+            // Fail pakka ho gaya — busy guard hatao, user Music Zone se dobara try kar sakta hai
+            await moveBusyState(payload.userId, payload.videoId, { step: 'music_zone', lastTitle: payload.title });
+            await sendMusicFailure(payload).catch(() => {});
+          }
+          else if (FAILURE_TEXT[job.type]) await evo.sendText(payload.instance, payload.to, FAILURE_TEXT[job.type].text).catch(() => {});
         }
       }
     }
