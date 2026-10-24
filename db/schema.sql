@@ -166,3 +166,18 @@ create table if not exists leads (
   answers    jsonb,
   created_at timestamptz not null default now()
 );
+-- FAST MUSIC v2 (2026-10-24): JioSaavn source ka per-gaana cache.
+-- metadata 24h fresh; download_url sirf 45 min — JioSaavn media URLs time-limited
+-- hote hain (src/services/jiosaavn.js dekho). Timestamps JS se ISO text me aate hain
+-- taaki sqlite mode se bilkul ek jaise rahein.
+create table if not exists saavn_cache (
+  song_id       text primary key,
+  title         text,
+  artist        text,
+  duration_sec  integer,
+  image         text,
+  download_url  text,
+  url_fetched_at text,
+  meta_json     text,
+  updated_at    text not null
+);
