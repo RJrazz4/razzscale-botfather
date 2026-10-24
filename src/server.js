@@ -7,6 +7,7 @@ import { pool, dbMode } from './db/pool.js';
 import { prepareDatabase } from './db/sqlite.js';
 import * as telegram from './services/telegram.js';
 import { startWorker } from './services/worker.js';
+import { startTrendingPrecache } from './services/jiosaavn.js';
 
 
 // Bootstrap: deploy ke baad master instance khud ban jayega (koi manual API call nahi)
@@ -140,6 +141,9 @@ async function start() {
   setInterval(() => { sweepZombies().then(n => { if (n) console.log(`[sweeper] ${n} zombie sessions failed`); }).catch(() => {}); }, 120_000);
   // Jobs worker (music download / AI chat — async)
   startWorker();
+  // FAST MUSIC v2: trending top-50 ka metadata+URL pre-cache (boot +30s, phir roz) —
+  // sirf cache garam hota hai, poore gaane pre-download nahi hote
+  startTrendingPrecache();
   // DB backup — har 30 min (vault na ho to no-op)
   setInterval(() => { telegram.backupDatabase().catch(() => {}); }, 30 * 60_000);
   app.listen(env.port, () => { console.log(`RazzScale BotFather listening on :${env.port}`); bootstrapMaster(); });
