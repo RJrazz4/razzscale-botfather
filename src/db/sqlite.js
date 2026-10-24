@@ -93,6 +93,11 @@ create table if not exists ad_impressions (
   primary key (jid, day)
 );
 create table if not exists vault_meta (key text primary key, value text);
+-- VIP consultation leads (FRONTEND BRIEF): confirm par ek row; id = Lead ID (RS-<base36>)
+create table if not exists leads (
+  id text primary key, jid text, user_id text, service text,
+  answers text, created_at text not null default (datetime('now'))
+);
 
 -- Plan §2.1 ke naam maujood canonical tables par views ke roop me (state ek hi jagah rehta hai)
 create view if not exists chat_state as select user_id, scope, state, expires_at from flow_state;
