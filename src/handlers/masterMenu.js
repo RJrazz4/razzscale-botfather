@@ -41,7 +41,7 @@ Namaste! 🙏 Gaane sunna, AI se baat, business automation — sab yahin, *bilku
 
 🎨 Image banana ho to *image* likho.
 ━━━━━━━━━━━━━━━
-📞 *Seedha baat karni ho to:* +91 72051 91890`;
+📞 *Insaan se baat karni ho* to yahin likho — Boss khud jawab denge.`;
 
 // ---------- Home menu (STATIC builder — music sabse upar, bada) ----------
 export function homeRows() {
