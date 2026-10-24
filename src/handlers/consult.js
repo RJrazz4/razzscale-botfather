@@ -1,10 +1,12 @@
 import * as evo from '../services/evolution.js';
-import { env } from '../config/env.js';
 import { setFlow, logUsage, pool } from '../db/pool.js';
 
 // VIP CONSULTATION (FRONTEND BRIEF V1.0, docs/FRONTEND-BRIEF-PLAN.md):
 // Guided consultation state machine — service chuno → (branch: social platforms/features
-// ya website type) → 2 sawal → summary (confirm/edit/cancel) → lead + owner handoff.
+// ya website type) → 2 sawal → summary (confirm/edit/cancel) → lead + HUMAN MODE.
+// NUMBER PRIVACY (2026-10-24): confirm par koi wa.me personal-number link NAHI jata —
+// lead save hoti hai, contact 12h ke liye pause ho jata hai, aur Boss (insaan) ISI chat me
+// khud baat karta hai. Personal number kisi public message me nahi jata.
 // masterMenu sirf yahan route karta hai; saari consult logic is file me hai.
 // Har screen: static list builder (speed — koi search/LLM nahi) + numbered text fallback.
 // Row budget (WhatsApp limit 10 rows/list) plan doc §3 ke hisaab se hai.
@@ -99,7 +101,7 @@ export function skipRows() {
 }
 export function summaryRows() {
   return [
-    { rowId: 'cf_confirm', title: '✅ Confirm karo', description: 'Pakka hai — Boss ko bhejo' },
+    { rowId: 'cf_confirm', title: '✅ Confirm karo', description: 'Pakka hai — Boss yahin baat karenge' },
     { rowId: 'cf_edit', title: '✏️ Edit karo', description: 'Jawab badalne hain' },
     { rowId: 'cf_cancel', title: '❌ Cancel karo', description: 'Ye requirement radd' },
     { ...MENU_ROW },
@@ -121,16 +123,26 @@ export function buildSummary(a = {}) {
   lines.push('', 'Sahi hai to *Confirm* karo — galti ho to *Edit*, band karna ho to *Cancel*.');
   return lines.join('\n');
 }
-export function buildHandoff(leadId, a = {}) {
-  const parts = [`Hi RazzScale! Meri requirement (Lead ID: ${leadId}):`, `Service: ${a.service || NA}`];
-  if (a.platform) parts.push(`Platform: ${a.platform}`);
-  const f = (a.features || []).map((n) => FEATURE_LABELS[n]).filter(Boolean);
-  if (f.length) parts.push(`Features: ${f.join(', ')}`);
-  if (a.webType) parts.push(`Website type: ${a.webType}`);
-  parts.push(`Business: ${a.business || NA}`, `Requirement: ${a.requirement || NA}`);
-  const link = `https://wa.me/${env.ownerWaNumber}?text=${encodeURIComponent(parts.join('\n'))}`;
-  const text = `Ho gaya! ✅ Tumhara *Lead ID: ${leadId}*\n\nBoss *RazzScale* se seedhi baat ke liye neeche wala link dabao — unki WhatsApp chat khulegi aur message pehle se likha hua milega.\n⚠️ Dhyaan do: link dabane se message apne aap NAHI jata — chat khulne ke baad wahan *Send* dabana hoga, tabhi baat shuru hogi.\n\n👉 ${link}`;
-  return { link, text };
+// Confirm ke baad ka message (PURE builder): Lead ID + human mode ki saaf jankari.
+// Koi link NAHI, koi number NAHI — baat isi chat me aage badhegi, insaan ke saath.
+export function buildConfirmedMessage(leadId, a = {}) {
+  return [
+    `Ho gaya! ✅ Tumhara *Lead ID: ${leadId}*`,
+    '',
+    'Tumhari requirement pakki ho gayi hai. 👍',
+    'Ab isi chat me *Boss (insaan) khud* tumse baat karenge — jo bhi kehna hai, bas yahin likh do.',
+    'Bot is chat me peeche hat gaya hai — beech me nahi ayega. 🙏',
+  ].join('\n');
+}
+
+// HUMAN MODE: contact ko paused_contacts me daalo (auto-pause wala hi table/mechanism —
+// sessionRouter 12h baad lazy-expire karta hai). Is dauraan bot is chat me chup rehta hai
+// aur dost/owner usi number se haath se aaram se baat kar sakta hai.
+export async function pauseForHuman(jid, reason = 'consult_handoff') {
+  await pool.query(
+    `insert into paused_contacts (jid, paused_at, reason) values ($1,$2,$3)
+     on conflict (jid) do update set paused_at=excluded.paused_at, reason=excluded.reason`,
+    [jid, new Date().toISOString(), reason]);
 }
 export function newLeadId() {
   return `RS-${Date.now().toString(36).toUpperCase()}`;
@@ -280,8 +292,11 @@ export async function handleConsult(ctx) {
           'insert into leads (id, jid, user_id, service, answers) values ($1,$2,$3,$4,$5)',
           [leadId, from, user.id, a.service || null, JSON.stringify(a)]).catch((e) => console.error('[consult] lead insert:', e?.message || e));
         await logUsage(user.id, 'consult_lead').catch(() => {});
+        // HUMAN MODE ON: is contact ke liye bot 12h peeche — Boss isi chat me khud baat karega.
+        // (Manual reply par auto-pause pehle se tha; ab confirm par pehle se hi pause lag jata hai.)
+        await pauseForHuman(from).catch((e) => console.error('[consult] human-mode pause:', e?.message || e));
         await setFlow(user.id, 'master', { step: 'menu' });
-        await evo.sendText(inst, from, buildHandoff(leadId, a).text);
+        await evo.sendText(inst, from, buildConfirmedMessage(leadId, a));
         return true;
       }
       if (t === 'cf_edit') { await save('consult_q1', a); await sendQ(inst, from, 1, a.business); return true; }
