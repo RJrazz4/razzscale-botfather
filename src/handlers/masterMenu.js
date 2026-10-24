@@ -1,4 +1,5 @@
 import * as evo from '../services/evolution.js';
+import { clampListTitle } from '../services/evolution.js';
 import { env } from '../config/env.js';
 import { setFlow, getFlow, logUsage } from '../db/pool.js';
 import { spawnSubBot } from '../services/spawner.js';
@@ -44,11 +45,15 @@ function musicPageText(results, fromIdx, toIdx) {
   return `${fromIdx === 0 ? 'Top results:' : 'Aur results:'}\n\n${lines}\n\nNumber likho (1-${toIdx}) — audio bhej dunga.${moreLine}`;
 }
 function musicListRows(results, shown) {
-  const rows = results.slice(0, shown).map((r, i) => ({
-    rowId: String(i + 1), // global index — sessionRouter list-reply ko isi se pick banata hai
-    title: (r.title || 'Gaana').length > 45 ? `${r.title.slice(0, 45)}…` : (r.title || 'Gaana'),
-    description: r.duration ? `${Math.floor(r.duration / 60)}:${String(r.duration % 60).padStart(2, '0')}` : undefined,
-  }));
+  const rows = results.slice(0, shown).map((r, i) => {
+    const dur = r.duration ? `${Math.floor(r.duration / 60)}:${String(r.duration % 60).padStart(2, '0')}` : '';
+    return {
+      rowId: String(i + 1), // global index — sessionRouter list-reply ko isi se pick banata hai
+      // WhatsApp list limit: row title ≤24 chars — poora title description (≤72) me rehta hai
+      title: clampListTitle(r.title || 'Gaana'),
+      description: dur ? `${r.title || 'Gaana'} • ${dur}` : (r.title || undefined),
+    };
+  });
   if (results.length > shown) rows.push({ rowId: 'more', title: '➕ More tracks', description: 'Aur results dekho' });
   return rows;
 }
@@ -63,7 +68,7 @@ async function sendMusicList(inst, from, results, shown) {
 
 export async function handleMasterMessage({ user, from, text, pushName, msgId }) {
   const inst = env.masterInstance;
-  const t = (text || '').trim();
+  let t = (text || '').trim();
   const flow = await getFlow(user.id, 'master');
   const state = flow?.step || 'menu';
 
@@ -88,8 +93,9 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId })
     const n = Number(t);
     if (Number.isInteger(n) && n >= 1 && n <= shown && results[n - 1]) {
       const pick = results[n - 1];
-      // lastTitle yaad rakho — gaana bajne ke baad 'lyrics' isi se kaam karega
-      await setFlow(user.id, 'master', { step: 'menu', lastTitle: pick.title });
+      // Halki 'music_done' state: delivery ke baad bhi lastTitle zinda rahe, taaki post-audio
+      // action list ke 'lyrics' / 'music_new' taps (aur type) dono kaam karein.
+      await setFlow(user.id, 'master', { step: 'music_done', lastTitle: pick.title });
       await evo.sendText(inst, from, `"${pick.title}" bhej raha hoon, ek minute…`);
       await evo.sendPresence(inst, from, 'recording', 55000);
       await enqueueJob('music_download',
@@ -98,6 +104,16 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId })
       return;
     }
     // number/more nahi hai to neeche ke flows (menu aadi) ko mauka do — return mat karo
+  }
+  // TAP-FIRST mapping (KDMusic-style, 2026-10-24): tappable lists ke rowIds ko wahi banao jo
+  // user type karke pata — existing handlers hi reuse hote hain, koi duplicate logic nahi.
+  //  - Menu list: 'm1'..'m5' → '1'..'5'. Post-audio action list: 'music_new' → '2',
+  //    'lyrics' (keyword branch neeche), 'menu' (menu-keyword branch neeche) — as-is aate hain.
+  // Gate: sirf menu/music_done states me — music_pick ke number-picks, spawn/ai_chat jaise
+  // state-flows me tap-text ko unke matlab se takrane mat do.
+  if (state === 'menu' || state === 'music_done') {
+    const TAP_MAP = { m1: '1', m2: '2', m3: '3', m4: '4', m5: '5', music_new: '2' };
+    if (TAP_MAP[t]) t = TAP_MAP[t];
   }
   // VIP pick: koi bhi advanced feature chuna → pitch + personal WhatsApp deep link
   if (state === 'vip_pick' && ['1','2','3','4','5'].includes(t)) {
@@ -155,12 +171,14 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId })
     await evo.sendList(inst, from, {
       title: 'RazzScale AI BotFather', buttonText: 'Menu Dekho',
       description: MENU_TEXT, footer: true, // menu = footer ON (rule)
-      sections: [{ title: 'Options', rows: [
-        { rowId: '1', title: 'Create Your Own Bot', description: 'Support / AI / Music / Lead Gen — FREE' },
-        { rowId: '2', title: 'Music Bot', description: 'Gaane ka naam → audio' },
-        { rowId: '3', title: 'Free AI Chat', description: 'Kuch bhi pucho' },
-        { rowId: '4', title: 'Image Generation', description: 'Meta AI par redirect' },
-        { rowId: '5', title: '🚀 Advanced Automation & VIP Tools', description: 'Bulk Msg, Lead Gen, Order System, White-Label' },
+      // TAP-FIRST: rows m1..m5 — upar wali TAP_MAP se '1'..'5' bankar existing handlers chalti hain.
+      // Titles ≤24 chars (WhatsApp list limit); kuch type karne ki zaroorat nahi, bas tap karo.
+      sections: [{ title: '🤖 RazzScale Services', rows: [
+        { rowId: 'm1', title: 'Apna Bot Banao', description: 'Apna WhatsApp bot FREE me banao' },
+        { rowId: 'm2', title: 'Music Bot — Gaana Suno', description: 'Gaane ka naam bhejo, audio pao' },
+        { rowId: 'm3', title: 'Free AI Chat', description: 'Kuch bhi pucho, jawab milega' },
+        { rowId: 'm4', title: 'Image Generation', description: 'Meta AI se photo banwao' },
+        { rowId: 'm5', title: 'VIP Tools & Automation', description: 'Bade business ke khaas tools' },
       ] }],
     }).catch(async () => { await evo.sendText(inst, from, MENU_TEXT, { footer: true }); });
     // kuch clients list ko text me badal kar bhejte hain — text fallback hamesha saath
@@ -169,7 +187,19 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId })
   }
   if (t === '1') {
     await setFlow(user.id, 'master', { step: 'spawn_type' });
-    await evo.sendText(inst, from, `Kaun sa bot banana hai? Number likho:\n\n1. Auto-Reply / Support Bot\n2. AI Assistant Bot\n3. Music Bot\n4. Lead Gen Bot`);
+    // Text fallback barkarar + tappable chooser (rowIds '1'..'4' = spawn_type ke text inputs hi;
+    // list-tap sessionRouter se text bankar aata hai aur neeche BOT_TYPES branch hi handle karta hai)
+    await evo.sendText(inst, from, `Kaun sa bot banana hai? Number likho ya list se tap karo:\n\n1. Auto-Reply / Support Bot\n2. AI Assistant Bot\n3. Music Bot\n4. Lead Gen Bot`);
+    await evo.sendList(inst, from, {
+      title: '🤖 Bot Types', buttonText: 'Bot Chuno',
+      description: 'Kaun sa bot banana hai? Tap karo 👇',
+      sections: [{ title: 'Bot Types', rows: [
+        { rowId: '1', title: 'Auto-Reply / Support Bot', description: 'Customer sawalon ke auto-jawab' },
+        { rowId: '2', title: 'AI Assistant Bot', description: 'Smart AI wala helper bot' },
+        { rowId: '3', title: 'Music Bot', description: 'Gaana bajane wala bot' },
+        { rowId: '4', title: 'Lead Gen Bot', description: 'Customer leads ikatthe karo' },
+      ] }],
+    }).catch(() => {});
     return;
   }
   if (t === '2') {
@@ -177,8 +207,9 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId })
     await evo.sendText(inst, from, 'Gaane ka naam bhejo — main top results dunga.');
     return;
   }
-  // Lyrics: gaana bajne ke baad (menu state, lastTitle yaad hai) user 'lyrics' likhe to worker se bol mangwao
-  if (lower === 'lyrics' && state === 'menu' && flow?.lastTitle) {
+  // Lyrics: gaana bajne ke baad ('menu' ya halki 'music_done' state — lastTitle yaad hai)
+  // user 'lyrics' likhe YA action list se tap kare (rowId 'lyrics' text bankar yahi aata hai) → worker job
+  if (lower === 'lyrics' && (state === 'menu' || state === 'music_done') && flow?.lastTitle) {
     await enqueueJob('lyrics',
       { instance: inst, to: from, userId: user.id, title: flow.lastTitle },
       `lyrics:${msgId || `${user.id}:${Date.now()}`}`);
