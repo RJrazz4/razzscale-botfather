@@ -4,6 +4,7 @@ import { env } from '../config/env.js';
 import { setFlow, getFlow, logUsage } from '../db/pool.js';
 import { spawnSubBot } from '../services/spawner.js';
 import { searchSongs } from '../services/music.js';
+import { searchSongsSaavn } from '../services/jiosaavn.js';
 import { enqueueJob } from '../services/worker.js';
 import { vipMenuText, vipPitchText, VIP_FEATURES } from './vip.js';
 import { handleConsult, resendConsultScreen, CONSULT_BACK } from './consult.js';
@@ -140,8 +141,12 @@ async function runMusicSearch(ctx, query, fromKind) {
   const { user, from, inst, flow } = ctx;
   await evo.sendText(inst, from, `🔍 *${query}* dhoondh raha hoon… bas ek minute, yahi raho 🎧`);
   await evo.sendPresence(inst, from, 'composing', 55000);
+  // FAST MUSIC v2: PEHLE JioSaavn source (seedha api.php — tez, CPU halka);
+  // 0 results ya fail par hi purana YT search (yt-dlp) fallback. Categories bhi
+  // isi raste se bharengi (unke preset queries bhi pehle saavn par jayengi).
   let results = [];
-  try { results = await searchSongs(query, 8); } catch { results = []; }
+  try { results = await searchSongsSaavn(query, 8); } catch { results = []; }
+  if (!results.length) { try { results = await searchSongs(query, 8); } catch { results = []; } }
   if (!results.length) {
     await setFlow(user.id, 'master', { step: 'music_zone', lastTitle: flow?.lastTitle }, FLOW_TTL);
     await sendMusicEmpty(inst, from);
@@ -267,7 +272,11 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId })
       await evo.sendText(inst, from, `"${pick.title}" bhej raha hoon, ek minute…`);
       await evo.sendPresence(inst, from, 'recording', 55000);
       await enqueueJob('music_download',
-        { instance: inst, to: from, userId: user.id, videoId: pick.id, title: pick.title, url: pick.url },
+        { instance: inst, to: from, userId: user.id, videoId: pick.id, title: pick.title,
+          // Source routing (FAST MUSIC v2): jiosaavn picks par worker saavn chain
+          // chalata hai; url sirf YT picks par (failure-text ka YouTube link wahi se banta hai).
+          source: pick.source || 'yt', songId: pick.source === 'jiosaavn' ? pick.id : undefined,
+          url: pick.source === 'jiosaavn' ? undefined : pick.url },
         `music:${msgId || `${user.id}:${pick.id}:${Date.now()}`}`);
       return;
     }
