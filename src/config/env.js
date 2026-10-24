@@ -6,7 +6,9 @@ export const env = {
   evolutionBase: (process.env.EVOLUTION_BASE_URL || 'http://localhost:8080').replace(/\/$/, ''),
   evolutionKey: process.env.EVOLUTION_API_KEY || '',
   masterInstance: process.env.MASTER_INSTANCE || 'razzscale-master',
-  masterWaLink: process.env.MASTER_WA_LINK || 'https://wa.me/91XXXXXXXXXX',
+  // Master BOT ka apna PUBLIC link — saare public surfaces (footer, VIP pitch) par yahi
+  // jata hai. Personal number public messages me KABHI nahi (privacy rule, 2026-10-24).
+  masterWaLink: process.env.MASTER_WA_LINK || 'https://wa.me/918249388815',
   // Owner (Boss) ka PERSONAL number — VIP handoff isi par jata hai. masterWaLink se alag hai
   // (woh master BOT ka apna link hai). Default wahi number jo handlers/vip.js me pehle se hai.
   ownerWaNumber: (process.env.OWNER_WA_NUMBER || '917205191890').replace(/\D/g, ''),
