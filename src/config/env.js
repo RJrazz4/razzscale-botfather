@@ -7,6 +7,9 @@ export const env = {
   evolutionKey: process.env.EVOLUTION_API_KEY || '',
   masterInstance: process.env.MASTER_INSTANCE || 'razzscale-master',
   masterWaLink: process.env.MASTER_WA_LINK || 'https://wa.me/91XXXXXXXXXX',
+  // Owner (Boss) ka PERSONAL number — VIP handoff isi par jata hai. masterWaLink se alag hai
+  // (woh master BOT ka apna link hai). Default wahi number jo handlers/vip.js me pehle se hai.
+  ownerWaNumber: (process.env.OWNER_WA_NUMBER || '917205191890').replace(/\D/g, ''),
   adminWaId: process.env.ADMIN_WA_ID || '',
   llmKeys: [process.env.OPENROUTER_API_KEY, process.env.OPENROUTER_API_KEY2].filter(Boolean),
   llmModel: process.env.FREE_LLM_MODEL || 'google/gemma-3-27b-it:free',
