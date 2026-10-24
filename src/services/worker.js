@@ -104,16 +104,26 @@ const EXECUTORS = {
   // RowIds masterMenu me text bankar handle hote hain: 'lyrics' → lyrics keyword branch,
   // 'music_new' → TAP_MAP se '2', 'menu' → menu keyword branch. List fail ho to purani text line fallback.
   async music_download(p) {
-    const file = await getAudioForVideo(p.videoId, p.title);
-    const b64 = fs.readFileSync(file).toString('base64');
-    await evo.sendMedia(p.instance, p.to, b64, p.title, 'audio', { footer: true });
-    // Delivery ho gayi — busy guard hatao, ab post-audio taps (lyrics/music_new) khulenge
-    await moveBusyState(p.userId, p.videoId, { step: 'music_done', lastTitle: p.title });
-    const actionList = await sendMusicActionList(p.instance, p.to, true);
-    if (!actionList) {
-      await evo.sendText(p.instance, p.to, "Lyrics chahiye to 'lyrics' likh do 🎵").catch(() => {});
+    // LIVE PRESENCE (2026-10-24): kaam chalte waqt user ko typing/recording dikhe —
+    // composing = dhoondh/download ho raha hai, recording = audio bheja ja raha hai,
+    // khatm (success ya fail) par paused. Presence kabhi main kaam ko nahi rokta
+    // (sendPresence andar hi errors swallow karta hai, upar se .catch bhi hai).
+    await evo.sendPresence(p.instance, p.to, 'composing', 20000).catch(() => {});
+    try {
+      const file = await getAudioForVideo(p.videoId, p.title);
+      await evo.sendPresence(p.instance, p.to, 'recording', 30000).catch(() => {});
+      const b64 = fs.readFileSync(file).toString('base64');
+      await evo.sendMedia(p.instance, p.to, b64, p.title, 'audio', { footer: true });
+      // Delivery ho gayi — busy guard hatao, ab post-audio taps (lyrics/music_new) khulenge
+      await moveBusyState(p.userId, p.videoId, { step: 'music_done', lastTitle: p.title });
+      const actionList = await sendMusicActionList(p.instance, p.to, true);
+      if (!actionList) {
+        await evo.sendText(p.instance, p.to, "Lyrics chahiye to 'lyrics' likh do 🎵").catch(() => {});
+      }
+      if (p.userId) await logUsage(p.userId, 'music').catch(() => {});
+    } finally {
+      await evo.sendPresence(p.instance, p.to, 'paused', 1000).catch(() => {});
     }
-    if (p.userId) await logUsage(p.userId, 'music').catch(() => {});
   },
   // Lyrics: last-played gaane ke bol lyrics.ovh (free) se — na mile to saaf mana kar do.
   async lyrics(p) {
@@ -134,8 +144,15 @@ const EXECUTORS = {
     if (p.userId) await logUsage(p.userId, 'lyrics').catch(() => {});
   },
   async ai_chat(p) {
-    const reply = await freeChat({ id: p.userId }, p.text);
-    await evo.sendText(p.instance, p.to, reply, { ad: true });
+    // LIVE PRESENCE: LLM soch raha hai — user ko 'composing' (typing…) dikhe, khatm par paused.
+    // (masterMenu enqueue ke waqt pehle hi ek quick composing bhejta hai — ye use refresh rakhta hai.)
+    await evo.sendPresence(p.instance, p.to, 'composing', 15000).catch(() => {});
+    try {
+      const reply = await freeChat({ id: p.userId }, p.text);
+      await evo.sendText(p.instance, p.to, reply, { ad: true });
+    } finally {
+      await evo.sendPresence(p.instance, p.to, 'paused', 1000).catch(() => {});
+    }
   },
 };
 
