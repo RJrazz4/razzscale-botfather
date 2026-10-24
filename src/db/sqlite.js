@@ -98,6 +98,14 @@ create table if not exists leads (
   id text primary key, jid text, user_id text, service text,
   answers text, created_at text not null default (datetime('now'))
 );
+-- FAST MUSIC v2 (2026-10-24): JioSaavn source ka per-gaana cache.
+-- metadata (title/artist) 24h fresh; download_url sirf 45 min — JioSaavn media URLs
+-- time-limited hote hain, purana URL CDN par dead mil sakta hai (jiosaavn.js dekho).
+create table if not exists saavn_cache (
+  song_id text primary key, title text, artist text, duration_sec integer,
+  image text, download_url text, url_fetched_at text, meta_json text,
+  updated_at text not null default (datetime('now'))
+);
 
 -- Plan §2.1 ke naam maujood canonical tables par views ke roop me (state ek hi jagah rehta hai)
 create view if not exists chat_state as select user_id, scope, state, expires_at from flow_state;
