@@ -1,5 +1,5 @@
-import * as evo from '../services/evolution.js';
-import { clampListTitle } from '../services/evolution.js';
+import * as evo from '../services/transport.js';
+import { clampListTitle } from '../services/transport.js';
 import { env } from '../config/env.js';
 import { setFlow, getFlow, logUsage } from '../db/pool.js';
 import { spawnSubBot } from '../services/spawner.js';
@@ -222,8 +222,11 @@ async function handleBack(ctx) {
   }
 }
 
-export async function handleMasterMessage({ user, from, text, pushName, msgId }) {
-  const inst = env.masterInstance;
+export async function handleMasterMessage({ user, from, text, pushName, msgId, channel }) {
+  // Channel: 'cloud' (Official API) ho to saare sends transport se Graph par jate hain
+  // (inst = CLOUD_INSTANCE pseudo-instance); warna Evolution master — purana behavior
+  // bilkul barkarar. Flow logic dono channels par EK hi hai.
+  const inst = channel === 'cloud' ? evo.CLOUD_INSTANCE : env.masterInstance;
   let t = (text || '').trim();
   const flow = await getFlow(user.id, 'master');
   const state = flow?.step || 'menu';
