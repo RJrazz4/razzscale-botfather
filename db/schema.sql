@@ -181,3 +181,15 @@ create table if not exists saavn_cache (
   meta_json     text,
   updated_at    text not null
 );
+
+-- WhatsApp Cloud API (Official, Hybrid Phase-1): Meta webhook inbound messages ka raw record
+create table if not exists whatsapp_events (
+  id         bigserial primary key,
+  wa_id      text,
+  message_id text,
+  type       text,
+  body_text  text,
+  payload    jsonb,
+  created_at timestamptz not null default now()
+);
+create index if not exists idx_whatsapp_events_created on whatsapp_events(created_at);
