@@ -33,18 +33,33 @@ export async function sendText(inst, to, text, opts = {}) {
   return okSend ? { cloud: true } : null;
 }
 
-export async function sendList(inst, to, { title, description, buttonText, sections, footer = false } = {}) {
+export async function sendList(inst, to, { title, description, buttonText, sections, footer = false, listBody } = {}) {
   if (!isCloud(inst)) return evo.sendList(inst, to, { title, description, buttonText, sections, footer });
+  // Cloud LIST body ke liye KHaas niyam (2026-10-25 production sabak): interactive
+  // body ek CHHOTA prompt hota hai — poora text-menu (MENU_TEXT ~670 chars +
+  // branding block + wa.me link) usme ghusana hi sabse khatarnak field tha (1024
+  // limit ke sabse qareeb, env-link par nirbhar, aur list ke hote hue duplicate).
+  // Isliye: caller listBody de to wahi; warna chhota description jaisa hai waisa;
+  // lamba description ho to sirf chhota generic prompt. Branding ka hissa sirf
+  // footer FIELD me rehta hai — wa.me wala poora footer TEXT sends par hi lagega
+  // (brandText wahan pehle jaisa hi chalta hai, footer rule barkarar).
+  const rawDesc = String(description || '');
+  const body = listBody ?? (rawDesc.length <= 300 ? rawDesc : 'Options neeche hain — ek tap karo 👇');
   const okSend = await graph.sendList(to, {
     header: title,
-    body: brandText(description, footer === true),
+    body,
     footer: footer === true ? '⚡ Powered by RazzScale AI' : undefined,
     buttonText,
     sections,
   });
   // Parity: Evolution sendList fail par THROW karta hai aur callers usi par text
   // fallback chalate hain (khaas taur par home menu) — Cloud par bhi waisa hi.
-  if (!okSend) throw new Error('cloud_list_send_failed');
+  // Fallback ghate to pehle ek line log — warna production me pata hi nahi chalta
+  // ki list gayi hi nahi (2026-10-25 wali ghatna ki asal jad yahi thi).
+  if (!okSend) {
+    console.error('[transport] list send failed → text fallback reason=cloud_list_send_failed');
+    throw new Error('cloud_list_send_failed');
+  }
   return { cloud: true };
 }
 
