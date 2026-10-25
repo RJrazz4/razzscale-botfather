@@ -55,11 +55,17 @@ export function homeRows() {
 }
 async function sendHomeMenu(inst, from) {
   // List primary (footer ON — menu = footer rule ki jagah); fail ho to text menu fallback (footer ON).
+  // Cloud par listBody chhota prompt hai — poora MENU_TEXT interactive body me NAHI
+  // jata (transport wala niyam); Evolution par description hi body banta hai, barkarar.
   await evo.sendList(inst, from, {
     title: '🤖 RazzScale AI BotFather', buttonText: 'Menu Dekho',
     description: MENU_TEXT, footer: true,
+    listBody: 'Namaste! 🙏 Gaane sunna, AI se baat, business automation — sab yahin, bilkul FREE!\n\nKya karna hai? Neeche wala button dabao aur tap karo 👇',
     sections: [{ title: '🤖 RazzScale Services', rows: homeRows() }],
-  }).catch(async () => { await evo.sendText(inst, from, MENU_TEXT, { footer: true }).catch(() => {}); });
+  }).catch(async () => {
+    console.error('[masterMenu] home list failed → text menu fallback');
+    await evo.sendText(inst, from, MENU_TEXT, { footer: true }).catch(() => {});
+  });
 }
 
 // ---------- Music Zone (STATIC builders) ----------
