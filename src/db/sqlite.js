@@ -107,6 +107,15 @@ create table if not exists saavn_cache (
   updated_at text not null default (datetime('now'))
 );
 
+-- WhatsApp Cloud API (Official, Hybrid Phase-1): Meta webhook se aaye inbound
+-- messages ka raw record (audit/debug ke liye; processing alag se jud sakti hai).
+create table if not exists whatsapp_events (
+  id integer primary key autoincrement, wa_id text, message_id text,
+  type text, body_text text, payload text,
+  created_at text not null default (datetime('now'))
+);
+create index if not exists idx_whatsapp_events_created on whatsapp_events(created_at);
+
 -- Plan §2.1 ke naam maujood canonical tables par views ke roop me (state ek hi jagah rehta hai)
 create view if not exists chat_state as select user_id, scope, state, expires_at from flow_state;
 create view if not exists subbots as select * from sessions;
