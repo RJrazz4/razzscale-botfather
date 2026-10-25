@@ -23,6 +23,14 @@ export const env = {
   sqlitePath: process.env.SQLITE_PATH || './data/botfather.db',
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || '', // sirf env se — kabhi log/print nahi
   telegramVaultChatId: process.env.TELEGRAM_VAULT_CHAT_ID || '',
+  // WhatsApp Cloud API (Official, Hybrid Phase-1) — saare optional; koi na ho to
+  // whatsapp-cloud module chup-chaap disabled rehta hai, boot kabhi fail nahi hota.
+  // Token/secret sirf env se — kabhi log/print nahi.
+  whatsappCloudToken: process.env.WHATSAPP_CLOUD_TOKEN || '',
+  whatsappPhoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID || '',
+  whatsappWabaId: process.env.WHATSAPP_WABA_ID || '',
+  whatsappWebhookVerifyToken: process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || '',
+  whatsappAppSecret: process.env.WHATSAPP_APP_SECRET || '',
 };
 
 // global_config cache (30s) — ENABLE_PAYWALL yahi se padha jata hai
