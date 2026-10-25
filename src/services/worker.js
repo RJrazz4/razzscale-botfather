@@ -2,7 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pool, logUsage, getFlow, setFlow } from '../db/pool.js';
 import { env } from '../config/env.js';
-import * as evo from './evolution.js';
+import * as evo from './transport.js';
+import * as graph from './graph-cloud.js';
 import * as telegram from './telegram.js';
 import { getAudioForVideo, searchSongs } from './music.js';
 import { getFreshUrl, withQuality } from './jiosaavn.js';
@@ -226,6 +227,55 @@ async function deliverSaavnTrack(p) {
   throw new Error('saavn_delivery_failed');
 }
 
+// ---------- Cloud (Official API): gaana LINK se delivery ----------
+// Evolution wali chain (vault/base64) Cloud par nahi chalti — wahan Meta khud CDN se
+// audio kheenchta hai (sendAudioByLink). Fresh URL jiosaavn.js se (TTL/cache niyam
+// wahi), quality ka faisla HEAD size se: 16MB se bada ho to 160, phir 96.
+async function deliverSaavnTrackCloud(p) {
+  const { url } = await getFreshUrl(p.songId);
+  let sendUrl = url;
+  const size = await headSize(url);
+  if (size && size > WHATSAPP_MAX) {
+    for (const kb of [160, 96]) {
+      const v = withQuality(url, kb);
+      const s2 = await headSize(v);
+      sendUrl = v;
+      if (!s2 || s2 <= WHATSAPP_MAX) break;
+    }
+  }
+  // transport ka cloud sendMedia = audio link send (Cloud audio par caption nahi hota)
+  const sent = await evo.sendMedia(p.instance, p.to, sendUrl, p.title, 'audio', { footer: true });
+  if (sent) return;
+  // Link fail — quality gira kar ek aur koshish (CDN kabhi ek rendition par akadta hai)
+  for (const v of qualityLadder(sendUrl)) {
+    if (v === sendUrl) continue;
+    const retry = await evo.sendMedia(p.instance, p.to, v, p.title, 'audio', { footer: true }).catch(() => null);
+    if (retry) return;
+  }
+  throw new Error('saavn_cloud_delivery_failed');
+}
+
+// Post-audio BUTTONS (Cloud) — Evolution par yahi kaam action LIST karti hai; Cloud par
+// 3 reply buttons: Lyrics / Naya gaana / Menu. Button ids masterMenu ke purane rowIds
+// hi hain — wahi branches (lyrics keyword / TAP_MAP music_new / menu keyword) chalenge.
+async function sendMusicActionButtons(to, ok) {
+  const buttons = ok
+    ? [
+      { id: 'lyrics', title: '🔤 Lyrics' },
+      { id: 'music_new', title: '🔍 Naya gaana' },
+      { id: 'menu', title: '🏠 Menu' },
+    ]
+    : [
+      { id: 'music_new', title: '🔍 Naya gaana' },
+      { id: 'menu', title: '🏠 Menu' },
+    ];
+  const sent = await graph.sendButtons(to, {
+    body: ok ? '🎵 Gaana mil gaya! Ab kya karna hai? Ek option tap karo 👇' : '🎵 Gaana nahi aaya. Aur kya karna hai? 👇',
+    buttons,
+  }).catch(() => false);
+  return Boolean(sent);
+}
+
 const EXECUTORS = {
   // Music: vault/disk/cold se audio lao aur WhatsApp par bhejo.
   // Footer rule: audio delivery = footer ON (caption me).
@@ -239,6 +289,28 @@ const EXECUTORS = {
     // (sendPresence andar hi errors swallow karta hai, upar se .catch bhi hai).
     await evo.sendPresence(p.instance, p.to, 'composing', 20000).catch(() => {});
     try {
+      if (p.instance === evo.CLOUD_INSTANCE) {
+        // CLOUD branch: file/vault wala rasta nahi — saavn gaana LINK se, uske baad
+        // action BUTTONS. YT-source pick ka audio link Cloud par nahi banta, isliye
+        // woh fail hokar sendMusicFailure ke YouTube-link wale text par jata hai.
+        if (p.source === 'jiosaavn' && p.songId) {
+          try {
+            await deliverSaavnTrackCloud(p);
+          } catch (e) {
+            p.url = undefined; p.videoId = null; // failure text bina dead-link ke jaye
+            throw e;
+          }
+        } else {
+          throw new Error('cloud_yt_link_only');
+        }
+        await moveBusyState(p.userId, p.videoId, { step: 'music_done', lastTitle: p.title });
+        const btns = await sendMusicActionButtons(p.to, true);
+        if (!btns) {
+          await evo.sendText(p.instance, p.to, "Lyrics chahiye to 'lyrics' likh do 🎵").catch(() => {});
+        }
+        if (p.userId) await logUsage(p.userId, 'music').catch(() => {});
+        return;
+      }
       if (p.source === 'jiosaavn' && p.songId) {
         // FAST MUSIC v2 chain (upar deliverSaavnTrack): vault -> URL -> buffer -> yt-dlp
         try {
@@ -309,6 +381,7 @@ async function sendMusicFailure(p) {
     ? `Ye gaana download nahi ho paya 😔\nTab tak YouTube par sun lo: ${link}`
     : 'Ye gaana download nahi ho paya 😔 — koi aur gaana try karo.';
   await evo.sendText(p.instance, p.to, text).catch(() => {});
+  if (p.instance === evo.CLOUD_INSTANCE) { await sendMusicActionButtons(p.to, false); return; }
   await sendMusicActionList(p.instance, p.to, false);
 }
 
