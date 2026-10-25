@@ -31,6 +31,64 @@ process.env.OPENROUTER_API_KEY = ''; // AI chat ka no-key deterministic jawab ch
 let fails = 0, passes = 0;
 const ok = (cond, label) => { console.log(`${cond ? 'PASS' : 'FAIL'}  ${label}`); cond ? passes++ : fails++; };
 
+// console.error capture — structured graph/transport fallback lines assert karne ke liye
+const errLines = [];
+const origConsoleError = console.error;
+console.error = (...args) => { errLines.push(args.map(String).join(' ')); origConsoleError(...args); };
+
+// ---------- STRICT Meta validator (INDEPENDENT — graph-cloud ke validator se alag
+// implementation, taaki builder khud apni jaanch na kare). Documented Cloud API
+// limits: text ≤4096; interactive body ≤1024; header/footer ≤60; list button ≤20;
+// sections ≤10; rows kul ≤10 aur per-section ≤10; section title ≤24; row id ≤200
+// (unique); row title ≤24; row description ≤72; buttons ≤3; button id ≤256
+// (unique); button title ≤20 (unique). Ullanghan = Meta-style 400 (#131009). ----
+function metaValidate(p) {
+  const bad = [];
+  const n = (s) => String(s ?? '').length;
+  if (!p || p.status === 'read') return bad;
+  if (p.type === 'text') { if (!n(p.text?.body) || n(p.text?.body) > 4096) bad.push('text.body'); return bad; }
+  if (p.type === 'audio') { if (!p.audio?.link) bad.push('audio.link'); return bad; }
+  if (p.type !== 'interactive') return bad;
+  const i = p.interactive;
+  if (!n(i.body?.text) || n(i.body?.text) > 1024) bad.push('body');
+  if (i.header && n(i.header.text) > 60) bad.push('header');
+  if (i.footer && n(i.footer.text) > 60) bad.push('footer');
+  if (i.type === 'list') {
+    const a = i.action || {};
+    if (!n(a.button) || n(a.button) > 20) bad.push('list.button');
+    const secs = a.sections || [];
+    if (!secs.length || secs.length > 10) bad.push('sections.count');
+    let total = 0; const ids = new Set();
+    for (const s of secs) {
+      if (n(s.title) > 24) bad.push('section.title');
+      const rows = s.rows || [];
+      if (!rows.length || rows.length > 10) bad.push('section.rows');
+      for (const r of rows) {
+        total++;
+        if (!n(r.id) || n(r.id) > 200 || ids.has(r.id)) bad.push('row.id');
+        ids.add(r.id);
+        if (!n(r.title) || n(r.title) > 24) bad.push('row.title');
+        if (r.description != null && n(r.description) > 72) bad.push('row.description');
+      }
+    }
+    if (total > 10) bad.push('rows.total');
+  }
+  if (i.type === 'button') {
+    const btns = i.action?.buttons || [];
+    if (!btns.length || btns.length > 3) bad.push('buttons.count');
+    const ids = new Set(); const titles = new Set();
+    for (const b of btns) {
+      if (!n(b.reply?.id) || n(b.reply?.id) > 256 || ids.has(b.reply?.id)) bad.push('button.id');
+      ids.add(b.reply?.id);
+      if (!n(b.reply?.title) || n(b.reply?.title) > 20 || titles.has(b.reply?.title)) bad.push('button.title');
+      titles.add(b.reply?.title);
+    }
+  }
+  return bad;
+}
+const strictRejections = []; // { violations, forceReject } — journey me hue Meta-400
+let rejectLists = false; // forced-failure test ke liye: lists ko Meta-style 400 do
+
 // ---------- Mock fetch: Graph / JioSaavn / lyrics.ovh / HEAD ----------
 const graphCalls = []; // saare Graph POST payloads, kram se
 // Frontend harness wala ASAL test vector (Tum Hi Ho) — decrypt offline chalta hai
@@ -53,7 +111,17 @@ const jsonRes = (obj, status = 200) => ({
 globalThis.fetch = async (url, opts = {}) => {
   const u = String(url);
   if (u.includes('graph.facebook.com')) {
-    graphCalls.push(JSON.parse(opts.body));
+    const payload = JSON.parse(opts.body);
+    graphCalls.push(payload);
+    // STRICT mode: documented limits todne wala (ya forced-reject) payload Meta
+    // ki tarah 400 (#131009) khayega — production wali khamosh-girwat ab test me
+    // pakdi jayegi, aur error log lines bhi assert hongi.
+    const violations = metaValidate(payload);
+    const forceReject = rejectLists && payload.type === 'interactive' && payload.interactive?.type === 'list';
+    if (violations.length || forceReject) {
+      strictRejections.push({ violations, forceReject });
+      return jsonRes({ error: { message: '(#131009) Parameter value is not valid', type: 'OAuthException', code: 131009, error_subcode: 2388093, fbtrace_id: 'strict-mock-trace' } }, 400);
+    }
     return jsonRes({ messages: [{ id: 'wamid.outbound' }] });
   }
   if (opts.method === 'HEAD') { // CDN size probe — chhoti file (3MB < 16MB cap)
@@ -101,6 +169,51 @@ ok(btns.interactive.type === 'button' && btns.interactive.action.buttons.length 
 ok(btns.interactive.action.buttons.every((b) => b.type === 'reply' && b.reply.title.length <= 20), 'buttons payload: reply shape + title ≤20 clamp');
 ok(btns.interactive.action.buttons.map((b) => b.reply.id).join(',') === 'a,b,c', 'buttons payload: pehle 3 hi, order barkarar');
 ok(graph.buildButtonsPayload('91999', { body: 'x', buttons: [] }) === null, 'buttons payload: khaali par null');
+
+// ---------- 1b. Builder hardening (jo caps pehle gayab the) + validator + error line ----------
+const manySecs = graph.buildListPayload('91999', {
+  body: 'x',
+  sections: Array.from({ length: 12 }, (_, i) => ({ title: `S${i}`, rows: [{ rowId: `r${i}`, title: 'T' }] })),
+});
+ok(manySecs.interactive.action.sections.length <= 10
+  && manySecs.interactive.action.sections.flatMap((s) => s.rows).length <= 10,
+  'list payload: 12 sections -> sections ≤10 aur kul rows ≤10');
+const badIds = graph.buildListPayload('91999', {
+  body: 'x',
+  sections: [{ title: 'S', rows: [
+    { rowId: 'x'.repeat(250), title: 'Lamba id wala' },
+    { rowId: 'dup', title: 'Ek' },
+    { rowId: 'dup', title: 'Do (duplicate id)' },
+    { rowId: 'ok1', title: 'Theek' },
+  ] }],
+});
+const badIdRows = badIds.interactive.action.sections[0].rows;
+ok(badIdRows.length === 2 && badIdRows.map((r) => r.id).join(',') === 'dup,ok1',
+  'list payload: row id >200 skip + duplicate row id skip');
+const badBtns = graph.buildButtonsPayload('91999', {
+  body: 'x',
+  buttons: [
+    { id: 'y'.repeat(300), title: 'Lamba id' },
+    { id: 'b1', title: 'Same' },
+    { id: 'b2', title: 'Same' },
+    { id: 'b3', title: 'Alag' },
+  ],
+});
+ok(badBtns.interactive.action.buttons.map((b) => b.reply.id).join(',') === 'b1,b3',
+  'buttons payload: button id >256 skip + duplicate title skip');
+const viol = graph.validateMessagePayload({
+  messaging_product: 'whatsapp', to: '1', type: 'interactive',
+  interactive: { type: 'list', body: { text: 'B'.repeat(1500) },
+    action: { button: 'X'.repeat(25), sections: [{ title: 'S'.repeat(30), rows: [{ id: 'r', title: 'T'.repeat(30), description: 'D'.repeat(90) }] }] } },
+});
+ok(viol.some((s) => s.includes('body>1024')) && viol.some((s) => s.includes('button>20')) && viol.some((s) => s.includes('title>24')),
+  'validator: over-limit payload ke violations pakde (body/button/title)');
+const errLine = graph.graphErrorLogLine(
+  { type: 'interactive', interactive: { type: 'list' } }, 400,
+  JSON.stringify({ error: { message: '(#131009) Parameter value is not valid', code: 131009, error_subcode: 2388093, fbtrace_id: 'FBTRACE1' } }));
+ok(errLine === '[graph-cloud] send failed type=list status=400 code=131009 message=(#131009) Parameter value is not valid subcode=2388093 fbtrace=FBTRACE1',
+  'error log line: structured format (type/status/code/message/subcode/fbtrace)');
+ok(!errLine.includes('test-token'), 'error log line: token kahin nahi');
 
 const tp = graph.buildTextPayload('91999', 'L'.repeat(2000));
 ok(tp.type === 'text' && tp.text.body.length === 2000, 'text payload: 2000-char body kata NAHI (limit 4096 — lyrics ke liye)');
@@ -164,6 +277,9 @@ const homeList = listsTo(A)[0];
 ok(Boolean(homeList), "A 'hi': HOME LIST gaya (fixed text NAHI)");
 ok(JSON.stringify(listRowIds(homeList)) === JSON.stringify(['mz', 'ai', 'vip', 'mk']), "A 'hi': home rows order mz/ai/vip/mk (frontend home jaisa)");
 ok(homeList.interactive.footer?.text?.includes('Powered by RazzScale AI'), "A 'hi': menu par footer hai (footer rule)");
+ok(!homeList.interactive.body.text.includes('wa.me') && homeList.interactive.body.text.length <= 300,
+  "A 'hi': list body CHHOTA prompt hai (poora text-menu + wa.me link body me NAHI — production sabak)");
+ok(metaValidate(homeList).length === 0, "A 'hi': home payload strict-Meta validator me saaf");
 ok(graphCalls.some((c) => c.status === 'read' && c.message_id === 'wamid.A1'), "A 'hi': markRead (blue tick) gaya");
 const { rows: evRows } = await pool.query('select * from whatsapp_events where message_id=$1', ['wamid.A1']);
 ok(evRows.length === 1 && evRows[0].wa_id === A && evRows[0].body_text === 'hi', "A 'hi': whatsapp_events me store hua");
@@ -234,6 +350,30 @@ await wc.processWhatsAppPayload(payloadText(C, 'wamid.C3', 'tum kaun ho'));
 const aiJob = await waitJob('ai_chat');
 ok(aiJob?.status === 'done', 'C ai: ai_chat job done');
 ok(sendsTo(C).some((c) => c.type === 'text' && c.text.body.includes('AI abhi set nahi')), 'C ai: LLM jawab (no-key fallback text) user tak gaya');
+
+// ---------- 4. STRICT journey audit + FORCED-FAILURE (production symptom ka reproduction) ----------
+// Upar ki poori journey (A/B/C) me ek bhi payload strict mock se reject NAHI
+// hona chahiye — matlab asal journey ke saare sends documented limits me saaf hain.
+ok(strictRejections.length === 0, `strict audit: journey ke saare payloads Meta-saaf (rejections=${strictRejections.length})`);
+
+// Production (2026-10-25 20:38) me Meta ne list reject ki thi aur error kahin log
+// nahi hua — wahi haal yahan jabardasti banakar: fallback chale AUR teeno log
+// lines (graph structured + transport + handler) pakki taur par dikhni chahiye.
+const D = '919444444444';
+rejectLists = true;
+const errBefore = errLines.length;
+await wc.processWhatsAppPayload(payloadText(D, 'wamid.D1', 'hi'));
+rejectLists = false;
+ok(sendsTo(D).some((c) => c.type === 'text' && c.text.body.includes('RAZZSCALE AI BOTFATHER')),
+  'D forced-fail: list reject hone par TEXT menu fallback gaya');
+const newErrs = errLines.slice(errBefore);
+ok(newErrs.some((l) => l.includes('[graph-cloud] send failed type=list status=400 code=131009')
+  && l.includes('subcode=2388093') && l.includes('fbtrace=strict-mock-trace')),
+  'D forced-fail: structured graph error line log hui (code/subcode/fbtrace ke saath)');
+ok(newErrs.some((l) => l.includes('[transport] list send failed → text fallback')),
+  'D forced-fail: transport fallback line log hui');
+ok(newErrs.some((l) => l.includes('[masterMenu] home list failed → text menu fallback')),
+  'D forced-fail: handler fallback line log hui');
 
 // temp test DB saaf karo
 for (const suf of ['', '-wal', '-shm']) { try { fs.rmSync(TEST_DB + suf, { force: true }); } catch { /* ignore */ } }
