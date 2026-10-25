@@ -1,23 +1,26 @@
 import crypto from 'node:crypto';
 import { env } from '../config/env.js';
-import { pool } from '../db/pool.js';
+import { pool, upsertUser } from '../db/pool.js';
+import * as graph from './graph-cloud.js';
+import { handleMasterMessage } from '../handlers/masterMenu.js';
 
-// WhatsApp Cloud API (Official) webhook module — Hybrid Phase-1 (2026-10-25).
-// Evolution (Baileys) wale raste se bilkul alag, uske parallel chalta hai:
-//   GET  /webhook/whatsapp  — Meta webhook verification (hub.challenge)
-//   POST /webhook/whatsapp  — inbound events: turant 200 ack, messages log + DB store,
-//                             aur (config ho to) fixed auto-reply.
-// Saare env optional hain — token/ID na ho to module disabled rehta hai aur
-// boot kabhi fail nahi hota. Token/secret kabhi log nahi hote.
-// 24h window ki maryada: reply SIRF inbound message ke jawab me jata hai;
-// koi outbound/template send is module me hai hi nahi.
+// WhatsApp Cloud API (Official) webhook — Hybrid Phase-2 (2026-10-25):
+// inbound par ab FIXED text reply NAHI jata — asal BotFather brain
+// (handlers/masterMenu.js ka wahi router jo Evolution par chalta hai) process
+// karta hai, aur jawab transport/graph-cloud se INTERACTIVE List/Buttons me
+// jata hai. Evolution wala rasta isse bilkul alag aur barkarar hai.
+// Maryada (locked): koi template / business-initiated send nahi — reply sirf
+// inbound ke jawab me (24h window by construction). Saare env optional;
+// config na ho to sends chup-chaap fail hote hain, boot kabhi nahi rukta.
+// Token/secret kabhi log nahi hote.
 
+// Phase-1 ka fixed text — ab bheja NAHI jata (brain live hai); export isliye
+// barkarar hai ki us samay ki cheezein/tests ispar tike the.
 export const AUTO_REPLY_TEXT = "RazzScale AI ✅ Official WhatsApp API live hai. Menu ke liye 'hi' likhein.";
-const GRAPH_VERSION = 'v21.0';
 
-// Auto-reply tabhi mumkin jab token + phone number id dono hon
+// Graph sends tabhi mumkin jab token + phone number id dono hon
 export function cloudConfigured() {
-  return Boolean(env.whatsappCloudToken && env.whatsappPhoneNumberId);
+  return graph.graphConfigured();
 }
 
 // X-Hub-Signature-256 = "sha256=" + HMAC_SHA256(rawBody, appSecret) ka hex.
@@ -34,6 +37,9 @@ export function verifySignature(rawBody, signatureHeader) {
 }
 
 // Meta payload -> saade message records. Statuses/other fields ignore hote hain.
+// Interactive replies (button/list) par selectionId = tap kiye hue row/button ka id —
+// router ke liye yahi "text" ka kaam karta hai (Evolution normalizer bhi rowId ko
+// hi text banata hai, isliye handlers dono channels par ek jaise chalte hain).
 export function extractMessages(body) {
   const out = [];
   for (const entry of body?.entry || []) {
@@ -41,14 +47,21 @@ export function extractMessages(body) {
       if (change?.field && change.field !== 'messages') continue;
       const value = change?.value || {};
       const phoneNumberId = value?.metadata?.phone_number_id || null;
+      const contacts = Array.isArray(value?.contacts) ? value.contacts : [];
       for (const m of value?.messages || []) {
+        const from = m?.from ? String(m.from) : null;
+        const reply = m?.interactive?.button_reply || m?.interactive?.list_reply || null;
+        const contact = contacts.find((c) => String(c?.wa_id) === from);
         out.push({
           wabaId: entry?.id ? String(entry.id) : null,
           phoneNumberId: phoneNumberId ? String(phoneNumberId) : null,
-          from: m?.from ? String(m.from) : null,
+          from,
           messageId: m?.id ? String(m.id) : null,
           type: m?.type ? String(m.type) : null,
           text: m?.text?.body != null ? String(m.text.body) : null,
+          selectionId: reply?.id != null ? String(reply.id) : null,
+          selectionTitle: reply?.title != null ? String(reply.title) : null,
+          pushName: contact?.profile?.name ? String(contact.profile.name) : null,
           timestamp: m?.timestamp ? String(m.timestamp) : null,
           raw: m,
         });
@@ -56,6 +69,22 @@ export function extractMessages(body) {
     }
   }
   return out;
+}
+
+// Router ke liye canonical events: text message -> kind 'text'; interactive tap ->
+// kind 'selection' aur text = selection id. Baaki types (image/audio/status events)
+// kind 'other' — woh sirf store/log honge, route nahi.
+export function normalizeCloudEvents(body) {
+  return extractMessages(body).map((m) => {
+    let kind = 'other';
+    let text = null;
+    if (m.type === 'text' && m.text) { kind = 'text'; text = m.text; }
+    else if (m.type === 'interactive' && m.selectionId) { kind = 'selection'; text = m.selectionId; }
+    return {
+      channel: 'cloud', from: m.from, messageId: m.messageId, type: m.type,
+      kind, text, pushName: m.pushName, raw: m.raw,
+    };
+  });
 }
 
 async function storeEvent(evt) {
@@ -66,39 +95,65 @@ async function storeEvent(evt) {
   } catch (e) { console.error('[whatsapp-cloud] store:', e?.message || e); }
 }
 
-// Graph API se ek text bhejo. Kabhi throw nahi karta — fail sirf log hota hai.
-export async function sendCloudText(to, text) {
-  if (!cloudConfigured()) return false;
+// Dedupe (Evolution wali processed_messages wali hi vidhi): Meta webhook retry par
+// ek hi message do baar process nahi hoga. Claim fail ho to message drop mat karo.
+async function claimMessage(messageId) {
+  if (!messageId) return true;
   try {
-    const res = await fetch(`https://graph.facebook.com/${GRAPH_VERSION}/${env.whatsappPhoneNumberId}/messages`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${env.whatsappCloudToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        messaging_product: 'whatsapp', recipient_type: 'individual',
-        to: String(to), type: 'text', text: { body: String(text) },
-      }),
-    });
-    if (!res.ok) {
-      const t = await res.text().catch(() => '');
-      console.error('[whatsapp-cloud] send failed:', res.status, t.slice(0, 200));
+    const { rows } = await pool.query(
+      'insert into processed_messages (id, ts) values ($1,$2) on conflict (id) do nothing returning id',
+      [messageId, new Date().toISOString()]);
+    return rows.length > 0;
+  } catch { return true; }
+}
+
+// Human mode (consult confirm par pauseForHuman paused_contacts me entry dalta hai):
+// paused contact par bot chup rahega — Boss isi chat me khud baat karta hai.
+// 12h lazy expiry sessionRouter wali hi hai.
+const PAUSE_MS = 12 * 3600_000;
+async function isPaused(jid) {
+  try {
+    const { rows } = await pool.query('select paused_at from paused_contacts where jid=$1', [jid]);
+    if (!rows[0]) return false;
+    if (Date.now() - new Date(rows[0].paused_at).getTime() >= PAUSE_MS) {
+      await pool.query('delete from paused_contacts where jid=$1', [jid]).catch(() => {});
       return false;
     }
     return true;
-  } catch (e) { console.error('[whatsapp-cloud] send:', e?.message || e); return false; }
+  } catch { return false; }
+}
+
+// Graph API se ek text bhejo (ab graph-cloud se — purana export compat ke liye).
+export async function sendCloudText(to, text) {
+  return graph.sendText(to, text);
 }
 
 // Ack ke baad ki asal processing — error yaha HTTP response ko kabhi nahi bigaadta.
-async function processPayload(body) {
-  const msgs = extractMessages(body);
-  if (!msgs.length) {
+// Har message: dedupe claim -> whatsapp_events store -> blue tick/typing ->
+// (paused ho to sirf store) -> upsertUser -> asal router (channel 'cloud').
+export async function processWhatsAppPayload(body) {
+  const evts = normalizeCloudEvents(body);
+  if (!evts.length) {
     console.log('[whatsapp-cloud] webhook event (message nahi — status/other, ignore)');
     return;
   }
-  for (const m of msgs) {
-    console.log(`[whatsapp-cloud] inbound from=${m.from} type=${m.type} id=${m.messageId} text=${(m.text || '').slice(0, 80)}`);
-    await storeEvent(m);
-    // 24h customer-service window: reply sirf inbound TEXT ke jawab me.
-    if (m.from && m.type === 'text') await sendCloudText(m.from, AUTO_REPLY_TEXT);
+  for (const ev of evts) {
+    try {
+      console.log(`[whatsapp-cloud] inbound from=${ev.from} type=${ev.type} kind=${ev.kind} id=${ev.messageId} text=${(ev.text || '').slice(0, 80)}`);
+      if (!(await claimMessage(ev.messageId))) {
+        console.log('[whatsapp-cloud] duplicate message — skip');
+        continue;
+      }
+      await storeEvent(ev);
+      graph.markRead(ev.messageId, true).catch(() => {}); // blue tick + typing, fail = koi baat nahi
+      if (!ev.from || !ev.text) continue; // media/other: sirf log/store, route nahi
+      if (await isPaused(ev.from)) {
+        console.log('[whatsapp-cloud] human mode (paused) — route skip');
+        continue;
+      }
+      const user = await upsertUser(ev.from, ev.pushName, 'direct');
+      await handleMasterMessage({ user, from: ev.from, text: ev.text, pushName: ev.pushName, msgId: ev.messageId, channel: 'cloud' });
+    } catch (e) { console.error('[whatsapp-cloud] process msg:', e?.message || e); }
   }
 }
 
@@ -123,12 +178,12 @@ export function handleWhatsAppWebhook(req, res) {
     }
   }
   res.sendStatus(200); // turant ack — Meta ka timeout/retry chakra na mare
-  processPayload(req.body || {}).catch((e) => console.error('[whatsapp-cloud] process:', e?.message || e));
+  processWhatsAppPayload(req.body || {}).catch((e) => console.error('[whatsapp-cloud] process:', e?.message || e));
 }
 
 // server.js bootstrap yahi call karta hai — Evolution routes ko haath nahi lagta.
 export function registerWhatsAppCloudRoutes(app) {
   app.get('/webhook/whatsapp', handleWhatsAppVerify);
   app.post('/webhook/whatsapp', handleWhatsAppWebhook);
-  console.log(`[whatsapp-cloud] webhook routes ready — auto-reply ${cloudConfigured() ? 'ON' : 'OFF (WHATSAPP_CLOUD_TOKEN / WHATSAPP_PHONE_NUMBER_ID missing)'}, signature ${env.whatsappAppSecret ? 'ON' : 'OFF (dev phase)'}`);
+  console.log(`[whatsapp-cloud] webhook routes ready — brain router ON, graph sends ${cloudConfigured() ? 'ON' : 'OFF (WHATSAPP_CLOUD_TOKEN / WHATSAPP_PHONE_NUMBER_ID missing)'}, signature ${env.whatsappAppSecret ? 'ON' : 'OFF (dev phase)'}`);
 }
