@@ -8,6 +8,7 @@ import { prepareDatabase } from './db/sqlite.js';
 import * as telegram from './services/telegram.js';
 import { startWorker } from './services/worker.js';
 import { startTrendingPrecache } from './services/jiosaavn.js';
+import { registerWhatsAppCloudRoutes } from './services/whatsapp-cloud.js';
 
 
 // Bootstrap: deploy ke baad master instance khud ban jayega (koi manual API call nahi)
@@ -33,7 +34,9 @@ async function bootstrapMaster() {
 
 
 const app = express();
-app.use(express.json({ limit: '25mb' }));
+// rawBody capture: WhatsApp Cloud API ki X-Hub-Signature-256 verify ke liye raw bytes
+// chahiye (parsed JSON se HMAC match nahi hota). Baaki routes par koi asar nahi.
+app.use(express.json({ limit: '25mb', verify: (req, res, buf) => { req.rawBody = buf; } }));
 app.get('/health', (req, res) => res.json({ ok: true, service: 'razzscale-botfather' }));
 
 
@@ -130,6 +133,10 @@ app.post('/webhook/evolution/:secret?', async (req, res) => {
     await handleEvolutionWebhook(instanceName, req.body, req.params.secret || null);
   } catch (e) { console.error('[webhook]', e?.message || e); }
 });
+
+// WhatsApp Cloud API (Official) — GET verify + POST events (services/whatsapp-cloud.js).
+// Evolution wale raste se alag; env na ho to auto-reply band, boot par koi asar nahi.
+registerWhatsAppCloudRoutes(app);
 
 
 async function start() {
