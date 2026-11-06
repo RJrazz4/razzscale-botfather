@@ -4,35 +4,37 @@ import { MASTER_INSTRUCTION } from '../config/instruction.js';
 
 let keyIdx = 0;
 
-// MODEL CHAIN (fix 2026-11-06): pehle dimag ek hi free model par tika tha —
-// 14:46 par gemma-free ne error diya to poora AI "busy" ho gaya, jabki chaabi
-// sahi lagi thi. Ab har call pasandeeda model ke baad doosre free models bhi
-// ek-ek karke try karta hai — ek provider atak jaye to baat nahi rukti. Har
-// nakami status ke saath log hoti hai (chaabi kabhi log nahi hoti) taaki
-// agli baar jad turant dikhe, andhere me na rahe.
+// PROVIDER ROTATION (2026-11-06, Hero: "do account se rotate karke
+// chalega"): pehle dimag ek hi raste par tika tha — woh atka to poora AI
+// "busy". Ab do hisse ghumte hain: (1) providers — pehle AgentRouter,
+// atak jaye to OpenRouter; (2) har provider ke andar uski chaabiyan aur
+// model ek-ek karke. Har provider ki chaabi SIRF usi ke raste par jati
+// hai. Har nakami provider+model+status ke saath log hoti hai (chaabi
+// kabhi log nahi hoti) taaki jad turant dikhe, andhere me na rahe.
 async function llmCall(messages, timeoutMs) {
-  if (!env.llmKeys.length) return null;
-  const models = [env.llmModel, ...env.llmFallbacks.filter((m) => m !== env.llmModel)];
-  for (const model of models) {
-    const key = env.llmKeys[keyIdx++ % env.llmKeys.length];
-    try {
-      const res = await fetch(`${env.llmBaseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(timeoutMs),
-        body: JSON.stringify({ model, messages }),
-      });
-      if (!res.ok) {
-        const errTxt = await res.text().catch(() => '');
-        console.error('[llm] model failed:', model, res.status, errTxt.slice(0, 200));
-        continue;
+  if (!env.llmProviders.length) return null;
+  for (const provider of env.llmProviders) {
+    for (const model of provider.models) {
+      const key = provider.keys[keyIdx++ % provider.keys.length];
+      try {
+        const res = await fetch(`${provider.baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+          signal: AbortSignal.timeout(timeoutMs),
+          body: JSON.stringify({ model, messages }),
+        });
+        if (!res.ok) {
+          const errTxt = await res.text().catch(() => '');
+          console.error('[llm] failed:', provider.name, model, res.status, errTxt.slice(0, 200));
+          continue;
+        }
+        const json = await res.json();
+        const content = json?.choices?.[0]?.message?.content?.trim();
+        if (content) return content;
+        console.error('[llm] empty content:', provider.name, model);
+      } catch (e) {
+        console.error('[llm] call error:', provider.name, model, e?.message || e);
       }
-      const json = await res.json();
-      const content = json?.choices?.[0]?.message?.content?.trim();
-      if (content) return content;
-      console.error('[llm] empty content:', model);
-    } catch (e) {
-      console.error('[llm] call error:', model, e?.message || e);
     }
   }
   return null;
