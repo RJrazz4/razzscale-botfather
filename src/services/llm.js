@@ -10,14 +10,13 @@ let keyIdx = 0;
 // ek-ek karke try karta hai — ek provider atak jaye to baat nahi rukti. Har
 // nakami status ke saath log hoti hai (chaabi kabhi log nahi hoti) taaki
 // agli baar jad turant dikhe, andhere me na rahe.
-const FALLBACK_MODELS = ['meta-llama/llama-3.3-70b-instruct:free', 'mistralai/mistral-small-3.1-24b-instruct:free', 'deepseek/deepseek-chat-v3-0324:free'];
 async function llmCall(messages, timeoutMs) {
   if (!env.llmKeys.length) return null;
-  const models = [env.llmModel, ...FALLBACK_MODELS.filter((m) => m !== env.llmModel)];
+  const models = [env.llmModel, ...env.llmFallbacks.filter((m) => m !== env.llmModel)];
   for (const model of models) {
     const key = env.llmKeys[keyIdx++ % env.llmKeys.length];
     try {
-      const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      const res = await fetch(`${env.llmBaseUrl}/chat/completions`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
         signal: AbortSignal.timeout(timeoutMs),
