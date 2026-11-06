@@ -8,6 +8,7 @@ import { searchSongsSaavn } from '../services/jiosaavn.js';
 import { enqueueJob } from '../services/worker.js';
 import { vipMenuText, vipPitchText, VIP_FEATURES } from './vip.js';
 import { handleConsult, resendConsultScreen, CONSULT_BACK } from './consult.js';
+import { handleWork, handleOwnerWork, resendWorkScreen, WORK_BACK } from './workplace.js';
 
 // FRONTEND BRIEF V1.0 (docs/FRONTEND-BRIEF-PLAN.md): music-first home, categories,
 // tap-only navigation (defined action IDs), guided VIP consultation (handlers/consult.js).
@@ -40,6 +41,9 @@ Namaste! 🙏 Gaane sunna, AI se baat, business automation — sab yahin, *bilku
 4️⃣ *Create Your Own Bot* 🤖
       Apna khud ka WhatsApp bot banao — FREE
 
+5️⃣ *Kaam Karwao* ✍️
+      Likhai wala kaam — caption, message, script
+
 🎨 Image banana ho to *image* likho.
 ━━━━━━━━━━━━━━━
 📞 *Insaan se baat karni ho* to yahin likho — Boss khud jawab denge.`;
@@ -51,6 +55,7 @@ export function homeRows() {
     { rowId: 'ai', title: '💬 Chat with AI', description: 'Kuch bhi pucho, jawab milega' },
     { rowId: 'vip', title: '🚀 VIP Automation', description: 'Business ke liye khaas kaam' },
     { rowId: 'mk', title: '🤖 Apna Bot Banao', description: 'Apna WhatsApp bot FREE me' },
+    { rowId: 'work', title: '✍️ Kaam Karwao', description: 'Likhai wala kaam — caption, message, script' },
   ];
 }
 async function sendHomeMenu(inst, from) {
@@ -206,6 +211,13 @@ async function handleBack(ctx) {
     await resendConsultScreen({ ...ctx, state: prev });
     return true;
   }
+  if (WORK_BACK[state]) {
+    const prev = WORK_BACK[state];
+    if (prev === 'menu') { await setFlow(user.id, 'master', { step: 'menu' }); await sendHomeMenu(inst, from); return true; }
+    await setFlow(user.id, 'master', { step: prev, work: flow?.work || {} }, FLOW_TTL);
+    await resendWorkScreen({ ...ctx, state: prev });
+    return true;
+  }
   switch (state) {
     case 'music_zone': case 'music_done': case 'music_busy': case 'ai_chat':
     case 'spawn_type': case 'vip_pick':
@@ -247,6 +259,10 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
   const state = flow?.step || 'menu';
   const lower = t.toLowerCase();
   const ctx = { user, from, text, t, lower, flow, state, inst, msgId, goHome: () => sendHomeMenu(inst, from) };
+
+  // ===== Owner (Boss) work approval — SABSE PEHLE, kisi bhi state se upar =====
+  // (Sirf owner number par chalta hai; customer ke liye hamesha false.)
+  if (await handleOwnerWork(ctx)) return;
 
   // ===== Global nav — state dispatch se PEHLE (Back/Main Menu har jagah consistent) =====
   if (t === 'nav_menu' || lower === 'main menu') {
@@ -311,6 +327,9 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
 
   // ===== VIP Consultation (naya state machine — masterMenu sirf route karta hai) =====
   if (await handleConsult(ctx)) return;
+
+  // ===== Workplace (likhai ke orders) =====
+  if (await handleWork(ctx)) return;
 
   // ===== Music Zone state =====
   if (state === 'music_zone') {
@@ -414,9 +433,13 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
     await enterAiChat(inst, from, user);
     return;
   }
-  if (t === 'vip' || (inMenuState && (t === '3' || t === '5'))) {
-    // '3' = naye text menu ka VIP number; '5' = purane text menu ka VIP number (aadat ka lihaz)
+  if (t === 'vip' || (inMenuState && t === '3')) {
+    // '3' = text menu ka VIP number ('5' ab Kaam Karwao ka hai — naya menu 5 items ka)
     await handleConsult({ ...ctx, t: 'vip', state });
+    return;
+  }
+  if (inMenuState && t === '5') {
+    await handleWork({ ...ctx, t: 'work', state });
     return;
   }
   if (t === 'mk' || (inMenuState && t === '4')) {
@@ -449,6 +472,21 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
       { instance: inst, to: from, userId: user.id, text: t },
       `ai:${msgId || `${user.id}:${Date.now()}`}`);
     return;
+  }
+
+  // ===== INTENT ROUTER (2026-11-06, Hero ki shikayat par) =====
+  // "Mujhe music sunna hai" jaisi saaf maang par baat-cheet me uljhane ki
+  // jagah seedha WAHI kaam chalu — asli agentic yahi hai: baat samjho, kaam
+  // shuru karo. Pakad abhi pakke shabdon se (music); baaki baatein neeche
+  // AI brain ko jati hain.
+  if (state === 'menu' && t) {
+    const musicWord = ['music', 'gaana', 'gana', 'song', 'songs', 'geet'].some((w) => t.includes(w));
+    const listenVerb = ['sunna', 'sunao', 'suna do', 'chahiye', 'chalao', 'bajao', 'lagao', 'play'].some((w) => t.includes(w));
+    if (musicWord && (listenVerb || t.split(/\s+/).length <= 3)) {
+      await setFlow(user.id, 'music', { step: 'music_home' });
+      await sendMusicZone(ctx);
+      return;
+    }
   }
 
   // ===== Default: AGENT MODE (2026-11-06, Hero ka order: "har page par agentic") =====
