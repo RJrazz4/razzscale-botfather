@@ -86,13 +86,19 @@ export function zoneRows() {
   ];
 }
 async function sendMusicZone(inst, from) {
-  await evo.sendText(inst, from, '🎵 *Music Zone*\n\nCategory tap karo — ya number likho:\n\n' +
-    [...Object.values(CATEGORIES).map((c, i) => `${i + 1}. ${c.label}`), '7. 🔍 Gaana Search Karo'].join('\n'));
-  await evo.sendList(inst, from, {
+  // DESIGN (2026-11-06, Hero ki report): pehle text-list + tappable list DONO
+  // jate the — user ko wahi categories do baar dikhti thi ("duplicate screen").
+  // Ab home-menu wala pattern: pehle SIRF tappable list; lamba text sirf tab
+  // jab list fail ho jaye (transport fail par throw karta hai, dono channels).
+  const listed = await evo.sendList(inst, from, {
     title: '🎵 Music Zone', buttonText: 'Category Chuno',
     description: 'Kaunsi category ke gaane? Tap karo 👇',
     sections: [{ title: 'Categories', rows: zoneRows() }],
-  }).catch(() => {});
+  }).then(() => true).catch(() => false);
+  if (!listed) {
+    await evo.sendText(inst, from, '🎵 *Music Zone*\n\nCategory tap karo — ya number likho:\n\n' +
+      [...Object.values(CATEGORIES).map((c, i) => `${i + 1}. ${c.label}`), '7. 🔍 Gaana Search Karo'].join('\n'));
+  }
 }
 
 // --- Music results helpers (KDMusic-style: 8 results, 3-3 ke pages, tappable list + number fallback) ---
@@ -121,12 +127,12 @@ function musicListRows(results, shown) {
   return rows;
 }
 async function sendMusicList(inst, from, results, shown) {
-  // List sirf sajawat hai — fail ho to chup-chaap ignore, text flow hi main hai.
-  await evo.sendList(inst, from, {
+  // List gayi to true, fail (throw) ho to false — caller tab text page bhejega.
+  return evo.sendList(inst, from, {
     title: '🎵 Top Results', buttonText: 'Gaana Chuno',
     description: 'Tap karke gaana chuno — ya number likh do 👇',
     sections: [{ title: 'Results', rows: musicListRows(results, shown) }],
-  }).catch(() => {});
+  }).then(() => true).catch(() => false);
 }
 // Khali results (brief §11 — empty state): saaf message + doosri category/search/menu ke rows
 async function sendMusicEmpty(inst, from) {
@@ -160,8 +166,11 @@ async function runMusicSearch(ctx, query, fromKind) {
   }
   const shown = Math.min(MUSIC_PAGE, results.length);
   await setFlow(user.id, 'master', { step: 'music_pick', results, shown, query, from: fromKind, lastTitle: flow?.lastTitle }, FLOW_TTL);
-  await evo.sendText(inst, from, musicPageText(results, 0, shown));
-  await sendMusicList(inst, from, results, shown);
+  // DESIGN (2026-11-06, wahi duplicate-screen report): results bhi pehle SIRF
+  // tappable list — poora text page sirf list fail hone par jayega. ('more'
+  // wale aage ke pages pehle ki tarah text hi rahenge — list budget ka niyam.)
+  const listed = await sendMusicList(inst, from, results, shown);
+  if (!listed) await evo.sendText(inst, from, musicPageText(results, 0, shown));
 }
 
 async function enterAiChat(inst, from, user) {
