@@ -1,5 +1,6 @@
 import * as evo from '../services/transport.js';
 import { setFlow, logUsage, pool } from '../db/pool.js';
+import { agentDecide } from '../services/llm.js';
 
 // VIP CONSULTATION (FRONTEND BRIEF V1.0, docs/FRONTEND-BRIEF-PLAN.md):
 // Guided consultation state machine — service chuno → (branch: social platforms/features
@@ -148,63 +149,88 @@ export function newLeadId() {
   return `RS-${Date.now().toString(36).toUpperCase()}`;
 }
 
-// ---------- Screen senders (text fallback + list, dono) ----------
+// ---------- Screen senders ----------
+// BANDHA PATTERN (2026-11-06, duplicate-screen fix — music wala hi sabak, ab
+// consult par bhi): pehle SIRF tappable list; lamba text sirf list fail
+// (throw) hone par. Summary isse bahar hai — wahan text hi asal content hai
+// aur list sirf Confirm/Edit/Cancel ke controls hain.
+async function listFirst(inst, from, listArgs, textFallback) {
+  const ok = await evo.sendList(inst, from, listArgs).then(() => true).catch(() => false);
+  if (!ok && textFallback) await evo.sendText(inst, from, textFallback);
+  return ok;
+}
 async function sendSvc(inst, from) {
-  await evo.sendText(inst, from, '🚀 *VIP Action Automation*\n\nKaunsi service chahiye? Number likho ya list se tap karo:\n\n' +
-    Object.entries(SVC_LABELS).map(([n, l]) => `${n}. ${l}`).join('\n'));
-  await evo.sendList(inst, from, {
+  await listFirst(inst, from, {
     title: '🚀 VIP Services', buttonText: 'Service Chuno',
     description: 'Kaunsi service chahiye? Tap karo 👇',
     sections: [{ title: 'Services', rows: svcRows() }],
-  }).catch(() => {});
+  }, '🚀 *VIP Action Automation*\n\nKaunsi service chahiye? Number likho ya list se tap karo:\n\n' +
+    Object.entries(SVC_LABELS).map(([n, l]) => `${n}. ${l}`).join('\n'));
 }
 async function sendPlat(inst, from) {
-  await evo.sendText(inst, from, '📱 *Kaunsa platform?*\n\n' +
-    Object.entries(PLAT_LABELS).map(([n, l]) => `${n}. ${l}`).join('\n') + '\n\nNumber likho ya list se tap karo.');
-  await evo.sendList(inst, from, {
+  await listFirst(inst, from, {
     title: '📱 Platform Chuno', buttonText: 'Platform Chuno',
     description: 'Social media — kaunsa platform? 👇',
     sections: [{ title: 'Platforms', rows: platRows() }],
-  }).catch(() => {});
+  }, '📱 *Kaunsa platform?*\n\n' +
+    Object.entries(PLAT_LABELS).map(([n, l]) => `${n}. ${l}`).join('\n') + '\n\nNumber likho ya list se tap karo.');
 }
 async function sendFeat(inst, from, selected = []) {
   const sel = selected.map((n) => FEATURE_LABELS[n]).filter(Boolean);
-  await evo.sendText(inst, from,
-    `✨ *Kaunsi cheezein chahiye?* Tap karke chuno — dobara tap karne se hat-ti hai.\n\nAbhi chuna hua: ${sel.length ? sel.join(', ') : 'kuch nahi'}\n\n📌 *"Full workflow automation"* bhi chahiye to *full* likh do (list me jagah ki limit hai, isliye woh row nahi hai).\nHo jaye to list me *"Ho gaya"* tap karo ya *done* likho.`);
-  await evo.sendList(inst, from, {
+  await listFirst(inst, from, {
     title: '✨ Features Chuno', buttonText: 'Features Dekho',
-    description: 'Jo chahiye woh tap karo 👇',
+    listBody: `Jo chahiye woh tap karo — dobara tap = hat jayega 👇\nAbhi chuna hua: ${sel.length ? sel.join(', ') : 'kuch nahi'}\n📌 Full workflow automation ke liye *full* likh do; ho jaye to "Ho gaya" tap karo ya *done* likho.`,
+    description: 'Kaunsi cheezein chahiye? Tap karo 👇',
     sections: [{ title: 'Features', rows: featRows(selected) }],
-  }).catch(() => {});
+  }, `✨ *Kaunsi cheezein chahiye?* Tap karke chuno — dobara tap karne se hat-ti hai.\n\nAbhi chuna hua: ${sel.length ? sel.join(', ') : 'kuch nahi'}\n\n📌 *"Full workflow automation"* bhi chahiye to *full* likh do (list me jagah ki limit hai, isliye woh row nahi hai).\nHo jaye to list me *"Ho gaya"* tap karo ya *done* likho.`);
 }
 async function sendWeb(inst, from) {
-  await evo.sendText(inst, from, '🌐 *Kis type ki website / tool?*\n\n' +
-    Object.entries(WEB_LABELS).map(([n, l]) => `${n}. ${l}`).join('\n') + '\n\nNumber likho ya list se tap karo.');
-  await evo.sendList(inst, from, {
+  await listFirst(inst, from, {
     title: '🌐 Type Chuno', buttonText: 'Type Chuno',
     description: 'Kis type ka kaam hai? 👇',
     sections: [{ title: 'Types', rows: webRows() }],
-  }).catch(() => {});
+  }, '🌐 *Kis type ki website / tool?*\n\n' +
+    Object.entries(WEB_LABELS).map(([n, l]) => `${n}. ${l}`).join('\n') + '\n\nNumber likho ya list se tap karo.');
 }
 async function sendQ(inst, from, which, prev) {
   const q = which === 1
     ? '❓ *Sawal 1/2:* Tumhare business ka naam kya hai?'
     : '❓ *Sawal 2/2:* Apni requirement 1-2 line me likh do — kya banwana hai, kis ke liye?';
   const note = prev ? `\n(Pehle wala jawab: "${prev}" — naya likhoge to wahi lagega, *skip* karoge to purana hi rahega.)` : '\nJawab na dena ho to *skip* likho ya list se Skip tap karo.';
-  await evo.sendText(inst, from, q + note);
-  await evo.sendList(inst, from, {
+  await listFirst(inst, from, {
     title: which === 1 ? '❓ Sawal 1/2' : '❓ Sawal 2/2', buttonText: 'Options',
-    description: 'Jawab likho, ya skip karo 👇',
+    listBody: q + note,
+    description: q.replace(/\*/g, ''),
     sections: [{ title: 'Options', rows: skipRows() }],
-  }).catch(() => {});
+  }, q + note);
 }
 async function sendSummary(inst, from, a) {
   await evo.sendText(inst, from, buildSummary(a));
+  await sendSummaryList(inst, from);
+}
+// Summary ke sirf controls (agent ke jawab ke baad — poora summary text dobara NAHI)
+async function sendSummaryList(inst, from) {
   await evo.sendList(inst, from, {
     title: '📋 Summary', buttonText: 'Pakka Karo',
     description: 'Summary sahi hai? 👇',
     sections: [{ title: 'Confirm', rows: summaryRows() }],
   }).catch(() => {});
+}
+
+// ---------- AGENT MODE helpers (2026-11-06, Hero ka order: "har page par agentic") ----------
+// Choice wali screen par agent: user ke shabdon se choice pehchano. Pakki
+// choice mile to uska number; warna agent ki chhoti salah/reply bhej kar null
+// (caller wahi screen dobara bhejega). Agent fail/limit par bhi null — form
+// kabhi agent ki wajah se nahi rukta.
+async function agentPick(ctx, a, stepLabel, labels) {
+  const { user, from, t, inst } = ctx;
+  await evo.sendPresence(inst, from, 'composing', 20000).catch(() => {});
+  const list = Object.entries(labels).map(([n, l]) => `${n}=${l}`).join(', ');
+  const d = await agentDecide(user, { step: `${stepLabel} (choose one: ${list})`, answers: a, text: t });
+  if (!d) return null;
+  if (d.reply) await evo.sendText(inst, from, d.reply);
+  if (d.action === 'choose' && labels[Number(d.value)]) return Number(d.value);
+  return null;
 }
 
 // ---------- State machine ----------
@@ -222,13 +248,36 @@ export async function handleConsult(ctx) {
 
   if (isEntry) { await setFlow(user.id, 'master', { step: 'consult_svc', answers: {} }, FLOW_TTL); await sendSvc(inst, from); return true; }
 
+  // Confirm/Cancel ka asal kaam — list tap aur typed shabd ("pakka", "cancel")
+  // dono yahin aate hain, taaki ek hi rasta rahe.
+  const doConfirm = async () => {
+    const leadId = newLeadId();
+    await pool.query(
+      'insert into leads (id, jid, user_id, service, answers) values ($1,$2,$3,$4,$5)',
+      [leadId, from, user.id, a.service || null, JSON.stringify(a)]).catch((e) => console.error('[consult] lead insert:', e?.message || e));
+    await logUsage(user.id, 'consult_lead').catch(() => {});
+    // HUMAN MODE ON: is contact ke liye bot 12h peeche — Boss isi chat me khud baat karega.
+    await pauseForHuman(from).catch((e) => console.error('[consult] human-mode pause:', e?.message || e));
+    await setFlow(user.id, 'master', { step: 'menu' });
+    await evo.sendText(inst, from, buildConfirmedMessage(leadId, a));
+  };
+  const doCancel = async () => {
+    await setFlow(user.id, 'master', { step: 'menu' });
+    await evo.sendText(inst, from, 'Theek hai, ye requirement radd kar di 🙏 Jab chaho, VIP section se dobara shuru kar sakte ho.');
+    if (ctx.goHome) await ctx.goHome();
+  };
+
   // Edit ke liye pichli screen ka back-chain consult ke andar hi hai
   // (nav_back global hai — masterMenu BACK map se consult ki pichli screen par bhejta hai,
   //  yahan sirf tab aata hai jab state consult_* ho ya action consult ka ho)
   switch (state) {
     case 'consult_svc': {
-      const n = Number((t.match(/^vip_svc_(\d)$/) || [])[1] || t);
-      if (!SVC_LABELS[n]) { await sendSvc(inst, from); return true; }
+      let n = Number((t.match(/^vip_svc_(\d)$/) || [])[1] || t);
+      if (!SVC_LABELS[n]) {
+        // AGENT MODE: number/tap na ho to agent shabdon se service pehchane
+        n = await agentPick(ctx, a, 'consult_svc', SVC_LABELS);
+        if (!n) { await sendSvc(inst, from); return true; }
+      }
       a.service = SVC_LABELS[n];
       if (n === 3) { await save('consult_web', a); await sendWeb(inst, from); }
       else if (n === 4) { await save('consult_plat', a); await sendPlat(inst, from); }
@@ -236,8 +285,11 @@ export async function handleConsult(ctx) {
       return true;
     }
     case 'consult_plat': {
-      const n = Number((t.match(/^soc_plat_(\d)$/) || [])[1] || t);
-      if (!PLAT_LABELS[n]) { await sendPlat(inst, from); return true; }
+      let n = Number((t.match(/^soc_plat_(\d)$/) || [])[1] || t);
+      if (!PLAT_LABELS[n]) {
+        n = await agentPick(ctx, a, 'consult_plat', PLAT_LABELS);
+        if (!n) { await sendPlat(inst, from); return true; }
+      }
       a.platform = PLAT_LABELS[n];
       if (!Array.isArray(a.features)) a.features = [];
       await save('consult_feat', a);
@@ -260,12 +312,26 @@ export async function handleConsult(ctx) {
         await sendFeat(inst, from, a.features);
         return true;
       }
+      // AGENT MODE: feature ke alawa kuch likha ho to agent se pehchanwa lo —
+      // choice mile to wahi feature toggle, warna salah ke saath screen wapas.
+      {
+        const picked = await agentPick(ctx, a, 'consult_feat', FEATURE_LABELS);
+        if (picked) {
+          const sel = new Set(Array.isArray(a.features) ? a.features : []);
+          if (sel.has(picked)) sel.delete(picked); else sel.add(picked);
+          a.features = [...sel].sort((x, y) => x - y);
+          await save('consult_feat', a);
+        }
+      }
       await sendFeat(inst, from, Array.isArray(a.features) ? a.features : []);
       return true;
     }
     case 'consult_web': {
-      const n = Number((t.match(/^web_type_(\d)$/) || [])[1] || t);
-      if (!WEB_LABELS[n]) { await sendWeb(inst, from); return true; }
+      let n = Number((t.match(/^web_type_(\d)$/) || [])[1] || t);
+      if (!WEB_LABELS[n]) {
+        n = await agentPick(ctx, a, 'consult_web', WEB_LABELS);
+        if (!n) { await sendWeb(inst, from); return true; }
+      }
       a.webType = WEB_LABELS[n];
       await save('consult_q1', a);
       await sendQ(inst, from, 1, a.business);
@@ -280,30 +346,45 @@ export async function handleConsult(ctx) {
     }
     case 'consult_q2': {
       if (t === 'q_skip' || lower === 'skip') { /* purana requirement rakho */ }
-      else if (t) a.requirement = t.slice(0, 300);
+      else if (t) {
+        // AGENT MODE: requirement ke andar sawal ghusa ho ("bot chahiye, kitna
+        // lagega?") to agent requirement saaf karke nikalega aur sawal ka
+        // jawab bhi dega — warna seedha field bharna (bina LLM kharcha).
+        if (t.includes('?')) {
+          await evo.sendPresence(inst, from, 'composing', 20000).catch(() => {});
+          const d = await agentDecide(user, { step: 'consult_q2 (user apni requirement likh raha hai — use saaf karke nikalo, aur andar koi sawal ho to jawab bhi do)', answers: a, text: t });
+          if (d?.action === 'set_field' && d.value) {
+            a.requirement = d.value.slice(0, 300);
+            if (d.reply) await evo.sendText(inst, from, d.reply);
+          } else a.requirement = t.slice(0, 300);
+        } else a.requirement = t.slice(0, 300);
+      }
       await save('consult_summary', a);
       await sendSummary(inst, from, a);
       return true;
     }
     case 'consult_summary': {
-      if (t === 'cf_confirm') {
-        const leadId = newLeadId();
-        await pool.query(
-          'insert into leads (id, jid, user_id, service, answers) values ($1,$2,$3,$4,$5)',
-          [leadId, from, user.id, a.service || null, JSON.stringify(a)]).catch((e) => console.error('[consult] lead insert:', e?.message || e));
-        await logUsage(user.id, 'consult_lead').catch(() => {});
-        // HUMAN MODE ON: is contact ke liye bot 12h peeche — Boss isi chat me khud baat karega.
-        // (Manual reply par auto-pause pehle se tha; ab confirm par pehle se hi pause lag jata hai.)
-        await pauseForHuman(from).catch((e) => console.error('[consult] human-mode pause:', e?.message || e));
-        await setFlow(user.id, 'master', { step: 'menu' });
-        await evo.sendText(inst, from, buildConfirmedMessage(leadId, a));
+      if (t === 'cf_confirm' || ['confirm', 'pakka', 'haan', 'sahi hai', 'yes'].includes(lower)) { await doConfirm(); return true; }
+      if (t === 'cf_edit' || ['edit', 'badlo', 'change'].includes(lower)) { await save('consult_q1', a); await sendQ(inst, from, 1, a.business); return true; }
+      if (t === 'cf_cancel' || ['cancel', 'band karo', 'radd', 'nahi chahiye'].includes(lower)) { await doCancel(); return true; }
+      // AGENT MODE (2026-11-06): summary par free-text = user BAAT kar raha
+      // hai — apni requirement de/sudhaar raha hai (jo sawal par skip kar di
+      // thi) ya kuch pooch raha hai. Form ki tarah wahi summary dobara
+      // phenkna band (Hero ki report: summary par "Business ki sale badhana
+      // hai" likhne par bot ne summary phir dikha di thi, baat nahi samjhi).
+      await evo.sendPresence(inst, from, 'composing', 20000).catch(() => {});
+      const d = await agentDecide(user, { step: 'consult_summary (Confirm/Edit/Cancel wali screen; fields: service, business, requirement — user apni requirement de ya sudhaare to set_field, sawal pooche to answer)', answers: a, text: t });
+      if (d?.action === 'set_field' && d.value) {
+        // Summary par diya naya text sabse zyada requirement hi hota hai
+        a.requirement = d.value.slice(0, 300);
+        await save('consult_summary', a);
+        if (d.reply) await evo.sendText(inst, from, d.reply);
+        await sendSummary(inst, from, a);
         return true;
       }
-      if (t === 'cf_edit') { await save('consult_q1', a); await sendQ(inst, from, 1, a.business); return true; }
-      if (t === 'cf_cancel') {
-        await setFlow(user.id, 'master', { step: 'menu' });
-        await evo.sendText(inst, from, 'Theek hai, ye requirement radd kar di 🙏 Jab chaho, VIP section se dobara shuru kar sakte ho.');
-        if (ctx.goHome) await ctx.goHome();
+      if (d?.reply) {
+        await evo.sendText(inst, from, d.reply);
+        await sendSummaryList(inst, from);
         return true;
       }
       await sendSummary(inst, from, a);
