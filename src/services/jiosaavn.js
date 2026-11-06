@@ -203,6 +203,10 @@ export function scoreSaavnSong(s, query) {
   const overlap = queryOverlap(query, s.song || s.title || '');
   const plays = Number(s.play_count) || 0;
   let score = 4 * overlap + 1.15 * Math.log10(plays + 1);
+  // Artist bonus (Hero ka official-channel wala niyam, Saavn taraf): user ne
+  // artist ka naam likha ho aur gaana usi artist ka ho to upar rakho.
+  const qWordsForArtist = foldText(query).split(' ').filter((w) => w.length >= 3);
+  if (qWordsForArtist.some((w) => artistF.split(/[\s,]+/).includes(w))) score += 1.2;
   if (MAJOR_LABEL_WORDS.some((w) => labelF.includes(w))) score += 1.2;
   if (albumF && albumF !== titleF) score += 0.4;
   const queryF = foldText(query);
