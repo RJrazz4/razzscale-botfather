@@ -28,6 +28,20 @@ export function scoreYtTrack(track, query, position = 0, total = 8) {
   score += views > 0 ? 1.15 * Math.log10(views + 1) : Math.max(0, 3.2 - position * 0.35);
   if (MAJOR_CHANNEL_WORDS.some((w) => channelF.includes(w))) score += 1.2;
   if (allText.includes('official')) score += 0.5;
+  // ⭐ OFFICIAL CHANNEL PEHCHAN (Hero, 2026-11-06 raat — Telegram wale music
+  // boton wala jugaad): gaana usi ke channel se pehle mile jiska woh hai —
+  // T-Series ka gaana T-Series se, Arijit Singh ka gaana Arijit Singh ke
+  // apne channel se, Honey Singh/Badshah ka unke channel se.
+  // Nishan 1: user ne query me channel/artist ka naam khud likha hai aur
+  // natija usi channel se hai.
+  const queryF2 = foldText(query);
+  if (channelF.length >= 4 && queryF2.includes(channelF)) score += 2.5;
+  // Nishan 2: title ke hisse (Artist — Song | ...) me jo artist likha hai,
+  // channel ka naam bhi wahi hai = artist ka apna official channel.
+  if (channelF.length >= 4) {
+    const segments = titleF.split(/[|—:()[\]-]+/).map((x) => x.trim()).filter(Boolean);
+    if (segments.some((seg) => seg === channelF || (seg.length >= 5 && channelF.includes(seg)) || (channelF.length >= 5 && seg.includes(channelF)))) score += 2.0;
+  }
   const queryF = foldText(query);
   for (const w of PENALTY_WORDS) if (allText.includes(w) && !queryF.includes(w)) score -= 2.2;
   if (!queryF.includes('remix') && allText.includes('remix')) score -= 2.2;
