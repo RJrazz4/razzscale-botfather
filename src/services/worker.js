@@ -400,14 +400,31 @@ const EXECUTORS = {
     // WORKPLACE v1 (likhai): kaam banao → jobs row me result save → customer
     // ko 'taiyaar hai' ki khabar → Boss ko approval buttons. Delivery Boss ke
     // tap ke baad hi hoti hai (handlers/workplace.js → handleOwnerWork).
-    await evo.sendPresence(p.instance, p.to, 'composing', 15000).catch(() => {});
+    // WEB ORDER (source='web'): customer WhatsApp chat me hai hi nahi — use
+    // presence/'taiyaar hai' text bhejna bekaar hai (window bhi band hota
+    // hai). Uski khabar Boss ko jati hai; delivery Boss ke 'Bhej do' par
+    // uske number par hogi.
+    const isWeb = p.source === 'web';
+    if (!isWeb) await evo.sendPresence(p.instance, p.to, 'composing', 15000).catch(() => {});
     const out = await workWrite({ id: p.userId }, { kind: p.workKind, brief: p.brief });
     if (!out) {
-      await evo.sendText(p.instance, p.to, 'Maaf karo, ye kaam abhi nahi ban paya 😔 — thodi der me dobara try karo, ya VIP section se Boss se baat kar lo.');
+      if (isWeb) await notifyOwner(p.instance, `⚠️ *Web order ${p.orderId} nahi ban paya*\n👤 +${p.to}\n📝 ${p.workKind}: "${String(p.brief || '').slice(0, 140)}"\nCustomer ko khabar nahi gayi — chaho to WhatsApp par haath se baat kar lo.`).catch(() => {});
+      else await evo.sendText(p.instance, p.to, 'Maaf karo, ye kaam abhi nahi ban paya 😔 — thodi der me dobara try karo, ya VIP section se Boss se baat kar lo.');
       return;
     }
     if (out.startsWith('CLARIFY:')) {
-      await evo.sendText(p.instance, p.to, `Ek chhoti si baat aur bata do, phir kaam pakka banega 🙏\n${out.replace('CLARIFY:', '').trim()}\n\n(Jawab ke saath menu se *Kaam Karwao* wala order dobara de dena.)`);
+      const question = out.replace('CLARIFY:', '').trim();
+      if (isWeb) {
+        try {
+          const { rows } = await pool.query('select payload from jobs where idempotency_key=$1', [`work:${p.orderId}`]);
+          const pl = rows[0] ? (typeof rows[0].payload === 'string' ? JSON.parse(rows[0].payload) : rows[0].payload) : {};
+          pl.stage = 'clarify';
+          await pool.query('update jobs set payload=$2 where idempotency_key=$1', [`work:${p.orderId}`, JSON.stringify(pl)]);
+        } catch { /* stage na lage to bhi owner ko khabar ja chuki hogi */ }
+        await notifyOwner(p.instance, `❓ *Web order ${p.orderId} — aur tafseel chahiye*\n👤 +${p.to}\n📝 ${p.workKind}: "${String(p.brief || '').slice(0, 140)}"\n🤖 Agent ka sawal: ${question}\nCustomer se WhatsApp par puchh kar order aage badhao.`).catch(() => {});
+      } else {
+        await evo.sendText(p.instance, p.to, `Ek chhoti si baat aur bata do, phir kaam pakka banega 🙏\n${question}\n\n(Jawab ke saath menu se *Kaam Karwao* wala order dobara de dena.)`);
+      }
       return;
     }
     await pool.query('update jobs set result=$2 where idempotency_key=$1', [`work:${p.orderId}`, out]).catch(() => {});
@@ -417,7 +434,7 @@ const EXECUTORS = {
       pl.stage = 'ready';
       await pool.query('update jobs set payload=$2 where idempotency_key=$1', [`work:${p.orderId}`, JSON.stringify(pl)]);
     } catch { /* stage na lage to bhi worklist result se hi pehchan lega */ }
-    await evo.sendText(p.instance, p.to, '✅ *Tumhara kaam taiyaar hai!*\nEk aakhri quality jaanch ke baad yahin bhej raha hoon — bas kuch der 🙏');
+    if (!isWeb) await evo.sendText(p.instance, p.to, '✅ *Tumhara kaam taiyaar hai!*\nEk aakhri quality jaanch ke baad yahin bhej raha hoon — bas kuch der 🙏');
     await notifyOwnerForApproval(p, out).catch((e) => console.error('[work] owner notify fail:', e?.message || e));
   },
 };
