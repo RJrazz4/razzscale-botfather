@@ -151,24 +151,127 @@ export async function getSongMeta(songId) {
   return cacheRow(songId);
 }
 
+// ---------- Search ranking (2026-11-06 raat — Hero ki shikayat par) ----------
+// MASLA (live saboot ke saath): Saavn ki apni khoj lyric-line wali query par
+// cover/lofi/bhakti versions upar rakhti hai aur kai mashhoor official gaane
+// (maslan Ek Villain ka 'Zaroorat') khoj me aate hi nahi — API ka index hi
+// aisa hai. Isliye: (1) kai queryon se ummeedwar jama karo, (2) har ummeedwar
+// ko ASAL nishaanon par naapo — kitni baar baja (play_count), label kitna
+// bada, title query se kitna milta hai, aur cover-wale shabd kitne hain.
+// fold: chhote akshar + z->j (Zaroorat/Jarurat ek hi shabd maano — Hinglish
+// spelling ka jhanjhat khatm) + bekaar nishaan hatao.
+export function foldText(s) {
+  return String(s || '').toLowerCase().replace(/z/g, 'j').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+const QUERY_STOPWORDS = new Set(['mujhe', 'mujhko', 'teri', 'tere', 'tera', 'meri', 'mera', 'mere', 'hai', 'hain', 'ho', 'ka', 'ki', 'ke', 'ko', 'se', 'mein', 'mai', 'ne', 'bhi', 'song', 'gaana', 'gana', 'full', 'video', 'audio', 'hindi', 'new', 'best', 'top']);
+export function distinctiveWords(query) {
+  const words = foldText(query).split(' ').filter((w) => w.length >= 3 && !QUERY_STOPWORDS.has(w));
+  if (words.length) return [...new Set(words)];
+  return [...new Set(foldText(query).split(' ').filter((w) => w.length >= 2))];
+}
+const MAJOR_LABEL_WORDS = ['t series', 'tseries', 'sony music', 'jee music', 'zee music', 'yrf', 'tips', 'saregama', 'universal music', 'warner music', 'aditya music', 'lahari', 'venus', 'eros', 'times music', 'speed records', 'geet mp3', 'white hill', 'hitz music', 'vyrl'];
+const PENALTY_WORDS = ['lofi', 'slowed', 'reverb', '8d', 'nightcore', 'karaoke', 'instrumental', 'ringtone', 'cover', 'flute', 'violin', 'bhakti', 'dj mix', 'dj remix'];
+// Loose fold: mel naapne ke liye — oo->u, ee->i (Zaroorat=Jarurat, Deewana=Diwana).
+// Bina iske asal title 'Zaroorat' user ke 'Jarurat' se mil hi nahi pata tha.
+export function looseFold(s) {
+  return foldText(s).replace(/oo/g, 'u').replace(/ee/g, 'i');
+}
+const GENERIC_QUERY_WORDS = new Set(['song', 'gaana', 'gana', 'full', 'video', 'audio', 'hindi', 'new', 'best', 'top', 'official', 'lyrics', 'lyrical']);
+// Query ke shabdon ka title se mel: khaas shabd (distinctive) dogune vajan ke,
+// baaki aam shabd ikahre. Sirf khaas shabd ginne par 'Jarurat' naam ka koi bhi
+// alag gaana poori kahani wale asal gaane se upar chala jata tha (live test).
+export function queryOverlap(query, titleText) {
+  const distinct = new Set(distinctiveWords(query));
+  const words = [...new Set(foldText(query).split(' ').filter((w) => w.length >= 2 && !GENERIC_QUERY_WORDS.has(w)))];
+  if (!words.length) return 0;
+  const titleLoose = looseFold(titleText);
+  const titleWords = new Set(titleLoose.split(' '));
+  let got = 0, total = 0;
+  for (const w of words) {
+    const weight = distinct.has(w) ? 2 : 1;
+    total += weight;
+    if (titleWords.has(looseFold(w)) || titleLoose.includes(looseFold(w))) got += weight;
+  }
+  return total ? got / total : 0;
+}
+export function scoreSaavnSong(s, query) {
+  const titleF = foldText(s.song || s.title || '');
+  const albumF = foldText(s.album || '');
+  const artistF = foldText(s.primary_artists || s.music || s.singers || '');
+  const labelF = foldText(s.label || '');
+  const allText = `${titleF} ${albumF} ${artistF} ${labelF}`;
+  const overlap = queryOverlap(query, s.song || s.title || '');
+  const plays = Number(s.play_count) || 0;
+  let score = 4 * overlap + 1.15 * Math.log10(plays + 1);
+  if (MAJOR_LABEL_WORDS.some((w) => labelF.includes(w))) score += 1.2;
+  if (albumF && albumF !== titleF) score += 0.4;
+  const queryF = foldText(query);
+  for (const w of PENALTY_WORDS) if (allText.includes(w) && !queryF.includes(w)) score -= 2.2;
+  if (queryF.includes('remix')) { /* remix maanga hai to sazaa nahi */ } else if (allText.includes('remix')) score -= 2.2;
+  const lang = String(s.language || '').toLowerCase();
+  if ((lang === 'bhojpuri' || lang === 'rajasthani') && !queryF.includes(lang)) score -= 1.2;
+  const dur = Number(s.duration) || 0;
+  if (dur && dur < 100) score -= 1.2;
+  if (dur > 560) score -= 0.8;
+  return Math.round(score * 100) / 100;
+}
+// Raw results -> naap-tol ke saath kram (sabse achha pehle) + nakal hatao.
+// Nakal = ek hi gaana kai compilation albums me (Tum Hi Ho 4 baar aaya tha) —
+// pehchan: bracket-hataya title ek ho aur plays lagbhag barabar (wahi asal
+// recording dobara listed) ya pehla artist ek ho — sabse achha score rakho.
+export function rankSaavnRaw(rawList, query) {
+  const scored = (rawList || []).map((s) => ({ s, score: scoreSaavnSong(s, query) }));
+  scored.sort((a, b) => b.score - a.score);
+  const seenIds = new Set();
+  const keptByTitle = new Map();
+  const out = [];
+  for (const { s, score } of scored) {
+    if (seenIds.has(s.id)) continue;
+    const titleCore = foldText(String(s.song || s.title || '').replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/\([^)]*\)/g, ' '));
+    const firstArtist = foldText(s.primary_artists || '').split(',')[0].trim();
+    const plays = Number(s.play_count) || 0;
+    const kept = keptByTitle.get(titleCore) || [];
+    const isDup = kept.some((k) => k.firstArtist === firstArtist || (Math.max(k.plays, plays) > 0 && Math.abs(k.plays - plays) <= 0.05 * Math.max(k.plays, plays)));
+    if (isDup) continue;
+    kept.push({ firstArtist, plays });
+    keptByTitle.set(titleCore, kept);
+    seenIds.add(s.id);
+    out.push({ raw: s, score });
+  }
+  return out;
+}
+
 // ---------- Search (PRIMARY) ----------
-// search.getResults results me encrypted_media_url saath aata hai — search ke saath hi
-// har gaana cache me chala jata hai (metadata + URL), taaki pick par taaza URL turant mile.
+// Khoj ka naya tareeka: sirf user ki query nahi — uske khaas shabdon wali
+// query bhi saath chalao (lyric-line ki jagah asal title aksar wahi hota hai),
+// saare ummeedwar milakar rank karo, phir top wale do.
 export async function searchSongsSaavn(query, limit = 8) {
-  const j = await apiCall('search.getResults', { q: String(query || ''), p: '1', n: String(limit) });
-  const raw = Array.isArray(j?.results) ? j.results : [];
+  const q = String(query || '').trim();
+  const queries = [q];
+  const distinct = distinctiveWords(q).join(' ');
+  if (distinct && foldText(distinct) !== foldText(q)) queries.push(distinct);
+  const rawById = new Map();
+  for (const qq of queries.slice(0, 2)) {
+    try {
+      const j = await apiCall('search.getResults', { q: qq, p: '1', n: '20' });
+      for (const s of Array.isArray(j?.results) ? j.results : []) if (s?.id && !rawById.has(s.id)) rawById.set(s.id, s);
+    } catch { /* ek query fail ho to dusri se kaam chalega */ }
+  }
+  const ranked = rankSaavnRaw([...rawById.values()], q);
   const tracks = [];
-  for (const s of raw) {
+  for (const { raw: s, score } of ranked) {
+    if (tracks.length >= limit) break;
     const track = mapSong(s);
     if (!track) continue;
     const url = preferredUrl(decryptMediaUrl(s.encrypted_media_url), s);
     // URL na bane (kuch gaane DRM/Pro-only hote hain) to track list me rakho hi mat —
     // user ko woh gaana dikhana hi bekaar hai jo baj hi nahi sakta.
     if (!url) continue;
+    track._score = score;
     tracks.push(track);
     upsertCache(track, url, s).catch(() => {}); // fire-and-forget: cache fail ho to search na ruke
   }
-  return tracks.slice(0, limit);
+  return tracks;
 }
 
 // ---------- Trending pre-cache ----------
