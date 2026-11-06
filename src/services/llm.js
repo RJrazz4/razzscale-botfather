@@ -71,3 +71,34 @@ export async function agentDecide(user, { step, answers = {}, text }) {
     return { action: d.action, value: String(d.value || ''), reply: String(d.reply || '').slice(0, 600) };
   } catch { return null; }
 }
+
+// WORK WRITE (2026-11-06): Workplace v1 (likhai) ka asal kaam banane wala.
+// freeChat wali hi keys/limit/usage ('llm' pool) — sirf system prompt alag:
+// ye user se baat NAHI karta, seedha TAIYAAR likhai deta hai jo customer ko
+// waisi ki waisi bheji ja sake. Brief dhundhla ho to 'CLARIFY:' wali ek line
+// (worker customer se wahi sawal poochega). Fail par null.
+const WORK_SYSTEM = `You are a professional Hindi/Hinglish copywriter inside RazzScale AI's workplace. You receive a writing order (kind + brief) and output ONLY the finished writing, ready to send to the customer as-is. No explanations, no "here is your text", no placeholders like [name]. Match the language of the brief (Hinglish Roman by default; Devanagari only if the brief is in Devanagari). Keep it natural, human and useful — never robotic, never a template feel. If the brief is too vague to write anything real, output a single line starting with "CLARIFY:" followed by the one question that must be asked first.`;
+export async function workWrite(user, { kind, brief, business }) {
+  try {
+    const limit = Number(await getConfig('FREE_LLM_DAILY_LIMIT', 100));
+    if (await usageToday(user.id, 'llm') >= limit) return null;
+    const key = env.llmKeys[keyIdx++ % Math.max(env.llmKeys.length, 1)];
+    if (!key) return null;
+    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(60000),
+      body: JSON.stringify({
+        model: env.llmModel,
+        messages: [
+          { role: 'system', content: WORK_SYSTEM },
+          { role: 'user', content: `KIND: ${kind}\nBUSINESS: ${business || 'nahi diya'}\nBRIEF: ${brief}` },
+        ],
+      }),
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    await logUsage(user.id, 'llm');
+    return json?.choices?.[0]?.message?.content?.trim() || null;
+  } catch { return null; }
+}
