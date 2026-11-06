@@ -75,7 +75,11 @@ export function isMetaFresh(row, now = Date.now()) {
 export function mapSong(s) {
   if (!s?.id) return null;
   const name = String(s.song || s.title || 'Gaana').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
-  const artist = String(s.singers || s.primary_artists || s.music || '').trim();
+  // WAJAH (2026-11-06 bug): search response ka 'singers' field kabhi DUSRE gaane ka
+  // artist chipka deta hai (DevSena case: singers='Arijit Singh' tha, asal gaana
+  // Mukesh Gurjar ka — primary_artists + primary_artists_id dono sahi the).
+  // Isliye artist ka bharosa: primary_artists pehle, singers sabse aakhir me.
+  const artist = String(s.primary_artists || s.music || s.singers || '').trim();
   const dur = Number(s.duration) || null;
   return {
     source: 'jiosaavn',
