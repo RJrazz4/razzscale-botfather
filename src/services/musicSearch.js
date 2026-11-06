@@ -1,0 +1,79 @@
+import { searchSongsSaavn, foldText, queryOverlap } from './jiosaavn.js';
+import { searchSongs } from './music.js';
+
+// MERGED MUSIC SEARCH (2026-11-06 raat — Hero ki shikayat: "officially song
+// nahi de pa raha hai, AI song aur Bhojpuri la raha hai").
+// SABOOT: JioSaavn ki khoj me kai mashhoor official gaane hote hi nahi
+// (Ek Villain ka 'Zaroorat' kisi bhi query par nahi mila), jabki YouTube par
+// T-Series ka official upload sabse upar hota hai. Aur jahan Saavn ke paas
+// official hai, wahan cover/lofi usse upar baithe the.
+// HAL: dono source PARALLEL chalao, har natije ko ek hi tarazu par naapo —
+// query se title ka mel + kitni baar baja/suna gaya (log) + official
+// channel/label ka bonus − cover-wale shabdon ki sazaa — phir milakar
+// sabse achhe 8 do. Pick ka rasta pehle jaisa hi hai (source dekh kar
+// saavn chain ya YT chain) — ye module sirf KRAM badalta hai.
+
+const MAJOR_CHANNEL_WORDS = ['t series', 'tseries', 'sony music', 'jee music', 'zee music', 'yrf', 'tips official', 'tips', 'saregama', 'universal music', 'warner music', 'aditya music', 'lahari', 'venus', 'eros', 'times music', 'speed records', 'geet mp3', 'white hill', 'hitz music', 'vyrl', 'lahari music'];
+const PENALTY_WORDS = ['lofi', 'slowed', 'reverb', '8d', 'nightcore', 'karaoke', 'instrumental', 'ringtone', 'cover', 'flute', 'violin', 'bhakti', 'reaction', 'ai version', 'dj mix', 'dj remix', 'status video', 'whatsapp status'];
+
+export function scoreYtTrack(track, query, position = 0, total = 8) {
+  const titleF = foldText(track.title || '');
+  const channelF = foldText(track.channel || '');
+  const allText = `${titleF} ${channelF}`;
+  const overlap = queryOverlap(query, track.title || '');
+  const views = Number(track.viewCount) || 0;
+  let score = 4 * overlap;
+  // Views mile to wahi asli taakat hai; na mile (purana cache) to YouTube ke
+  // apne kram par halka bharosa — pehle wale natije ko thoda zyada.
+  score += views > 0 ? 1.15 * Math.log10(views + 1) : Math.max(0, 3.2 - position * 0.35);
+  if (MAJOR_CHANNEL_WORDS.some((w) => channelF.includes(w))) score += 1.2;
+  if (allText.includes('official')) score += 0.5;
+  const queryF = foldText(query);
+  for (const w of PENALTY_WORDS) if (allText.includes(w) && !queryF.includes(w)) score -= 2.2;
+  if (!queryF.includes('remix') && allText.includes('remix')) score -= 2.2;
+  const dur = Number(track.duration) || 0;
+  if (dur && dur < 100) score -= 1.2;
+  if (dur > 560) score -= 0.8;
+  return Math.round(score * 100) / 100;
+}
+
+// Ek hi gaane ki nakal dono source se aaye to behtar wala rakho.
+// Pehchan: saavn ke gaane ka naam YT title ke andar mile (fold karke).
+function songCoreOf(track) {
+  if (track.source === 'jiosaavn') return foldText(track.song || '');
+  return '';
+}
+
+export async function searchMusicMerged(query, limit = 8) {
+  const [saavnRes, ytRes] = await Promise.allSettled([
+    searchSongsSaavn(query, 8),
+    searchSongs(query, 8),
+  ]);
+  const saavn = saavnRes.status === 'fulfilled' ? saavnRes.value || [] : [];
+  const ytRaw = ytRes.status === 'fulfilled' ? ytRes.value || [] : [];
+
+  const pool = [];
+  for (const t of saavn) pool.push({ track: t, score: Number(t._score) || 0 });
+  ytRaw.forEach((t, i) => pool.push({ track: t, score: scoreYtTrack(t, query, i, ytRaw.length) }));
+  pool.sort((a, b) => b.score - a.score);
+
+  const out = [];
+  const perSource = { jiosaavn: 0, yt: 0 };
+  const seenCore = new Set();
+  for (const { track, score } of pool) {
+    if (out.length >= limit) break;
+    const src = track.source === 'jiosaavn' ? 'jiosaavn' : 'yt';
+    if (perSource[src] >= 6) continue;
+    const core = songCoreOf(track);
+    if (core) {
+      if (seenCore.has(core)) continue;
+      seenCore.add(core);
+    }
+    track._score = score;
+    perSource[src]++;
+    out.push(track);
+  }
+  // Kuch na mile to jo mila wahi (khaali se behtar)
+  if (!out.length) return [...saavn, ...ytRaw].slice(0, limit);
+  return out;
+}
