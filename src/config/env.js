@@ -13,16 +13,35 @@ export const env = {
   // (woh master BOT ka apna link hai). Default wahi number jo handlers/vip.js me pehle se hai.
   ownerWaNumber: (process.env.OWNER_WA_NUMBER || '917205191890').replace(/\D/g, ''),
   adminWaId: process.env.ADMIN_WA_ID || '',
-  // LLM gateway (2026-11-06): default OpenRouter. LLM_API_KEY set ho to
-  // gateway mode — sirf wahi key chalegi (alag provider ki keys ek doosre
-  // ke yahan bekar hoti hain, isiliye milana nahi hai). LLM_BASE_URL se
-  // rasta badalta hai (OpenAI-compatible koi bhi gateway chal sakta hai).
-  llmKeys: (process.env.LLM_API_KEY
-    ? [process.env.LLM_API_KEY]
-    : [process.env.OPENROUTER_API_KEY, process.env.OPENROUTER_API_KEY2]).filter(Boolean),
-  llmBaseUrl: (process.env.LLM_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/$/, ''),
-  llmModel: process.env.FREE_LLM_MODEL || 'google/gemma-3-27b-it:free',
-  llmFallbacks: (process.env.LLM_FALLBACK_MODELS || 'meta-llama/llama-3.3-70b-instruct:free,mistralai/mistral-small-3.1-24b-instruct:free,deepseek/deepseek-chat-v3-0324:free').split(',').map((s) => s.trim()).filter(Boolean),
+  // LLM providers (2026-11-06, Hero: "do account se rotate karke chalega"):
+  // Do alag raste, har ek ki apni chaabi + apne model — chaabiyan kabhi
+  // ek doosre ke raste par NAHI bheji jati (galat provider ki key bekar
+  // hoti hai). Pehle AgentRouter (LLM_API_KEY), atak jaye to OpenRouter
+  // (OPENROUTER_API_KEY / _KEY2, dono ghumti hain). LLM_BASE_URL sirf
+  // AgentRouter wale raste par lagta hai; OpenRouter ka rasta bandha hai.
+  llmProviders: [
+    ...([process.env.LLM_API_KEY, process.env.AGENTROUTER_API_KEY].filter(Boolean).length ? [{
+      name: 'AgentRouter',
+      baseUrl: (process.env.LLM_BASE_URL || 'https://agentrouter.org/v1').replace(/\/$/, ''),
+      keys: [process.env.LLM_API_KEY, process.env.AGENTROUTER_API_KEY].filter(Boolean),
+      models: [...new Set([
+        process.env.LLM_MODEL || process.env.FREE_LLM_MODEL || 'gpt-6.1-sol',
+        ...(process.env.LLM_FALLBACK_MODELS || 'gpt-5.6-sol,gpt-6-astra').split(',').map((s) => s.trim()).filter(Boolean),
+      ])],
+    }] : []),
+    ...([process.env.OPENROUTER_API_KEY, process.env.OPENROUTER_API_KEY2].filter(Boolean).length ? [{
+      name: 'OpenRouter',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      keys: [process.env.OPENROUTER_API_KEY, process.env.OPENROUTER_API_KEY2].filter(Boolean),
+      models: [...new Set([
+        process.env.OPENROUTER_MODEL || 'google/gemma-3-27b-it:free',
+        ...(process.env.OPENROUTER_FALLBACK_MODELS || 'meta-llama/llama-3.3-70b-instruct:free,mistralai/mistral-small-3.1-24b-instruct:free,deepseek/deepseek-chat-v3-0324:free').split(',').map((s) => s.trim()).filter(Boolean),
+      ])],
+    }] : []),
+  ],
+  // Sirf maujoodgi ki jaanch ke liye (freeChat/agentDecide/workWrite ke
+  // "set hai ya nahi" wale darwaze) — asal call llmProviders se hoti hai.
+  llmKeys: [process.env.LLM_API_KEY, process.env.AGENTROUTER_API_KEY, process.env.OPENROUTER_API_KEY, process.env.OPENROUTER_API_KEY2].filter(Boolean),
   ytdlp: process.env.YTDLP_BIN || 'yt-dlp',
   musicTmp: process.env.MUSIC_TMP_DIR || '/tmp/razz-music',
   ffmpeg: process.env.FFMPEG_BIN || 'ffmpeg',
