@@ -5,6 +5,7 @@ import { setFlow, getFlow, logUsage } from '../db/pool.js';
 import { spawnSubBot } from '../services/spawner.js';
 import { searchSongs } from '../services/music.js';
 import { searchSongsSaavn } from '../services/jiosaavn.js';
+import { searchMusicMerged } from '../services/musicSearch.js';
 import { enqueueJob } from '../services/worker.js';
 import { vipMenuText, vipPitchText, VIP_FEATURES } from './vip.js';
 import { handleConsult, resendConsultScreen, CONSULT_BACK } from './consult.js';
@@ -158,12 +159,16 @@ async function runMusicSearch(ctx, query, fromKind) {
   const { user, from, inst, flow } = ctx;
   await evo.sendText(inst, from, `🔍 *${query}* dhoondh raha hoon… bas ek minute, yahi raho 🎧`);
   await evo.sendPresence(inst, from, 'composing', 55000);
-  // FAST MUSIC v2: PEHLE JioSaavn source (seedha api.php — tez, CPU halka);
-  // 0 results ya fail par hi purana YT search (yt-dlp) fallback. Categories bhi
-  // isi raste se bharengi (unke preset queries bhi pehle saavn par jayengi).
+  // MERGED SEARCH (2026-11-06 raat): Saavn akela official gaana kai baar de
+  // hi nahi pata tha (uski khoj me gaana hota hi nahi) aur cover upar rehte
+  // the — isliye dono source parallel, ek hi tarazu par naap kar (musicSearch).
+  // Merged fail ho to purani chain (Saavn -> YT) backup hai.
   let results = [];
-  try { results = await searchSongsSaavn(query, 8); } catch { results = []; }
-  if (!results.length) { try { results = await searchSongs(query, 8); } catch { results = []; } }
+  try { results = await searchMusicMerged(query, 8); } catch { results = []; }
+  if (!results.length) {
+    try { results = await searchSongsSaavn(query, 8); } catch { results = []; }
+    if (!results.length) { try { results = await searchSongs(query, 8); } catch { results = []; } }
+  }
   if (!results.length) {
     await setFlow(user.id, 'master', { step: 'music_zone', lastTitle: flow?.lastTitle }, FLOW_TTL);
     await sendMusicEmpty(inst, from);
