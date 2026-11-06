@@ -9,6 +9,7 @@ import * as telegram from './services/telegram.js';
 import { startWorker } from './services/worker.js';
 import { startTrendingPrecache } from './services/jiosaavn.js';
 import { registerWhatsAppCloudRoutes } from './services/whatsapp-cloud.js';
+import { registerWebDoorRoutes } from './handlers/webDoor.js';
 
 
 // Bootstrap: deploy ke baad master instance khud ban jayega (koi manual API call nahi)
@@ -138,6 +139,9 @@ app.post('/webhook/evolution/:secret?', async (req, res) => {
 // Evolution wale raste se alag; env na ho to auto-reply band, boot par koi asar nahi.
 registerWhatsAppCloudRoutes(app);
 
+
+// Website darwaza (tubeclickpro.in se likhai order -> wahi jobs line).
+registerWebDoorRoutes(app);
 
 async function start() {
   // SQLite mode: pehle vault se DB restore (agar local file missing hai), phir hi kuch aur
