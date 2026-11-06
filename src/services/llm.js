@@ -3,28 +3,55 @@ import { usageToday, logUsage } from '../db/pool.js';
 import { MASTER_INSTRUCTION } from '../config/instruction.js';
 
 let keyIdx = 0;
+
+// MODEL CHAIN (fix 2026-11-06): pehle dimag ek hi free model par tika tha —
+// 14:46 par gemma-free ne error diya to poora AI "busy" ho gaya, jabki chaabi
+// sahi lagi thi. Ab har call pasandeeda model ke baad doosre free models bhi
+// ek-ek karke try karta hai — ek provider atak jaye to baat nahi rukti. Har
+// nakami status ke saath log hoti hai (chaabi kabhi log nahi hoti) taaki
+// agli baar jad turant dikhe, andhere me na rahe.
+const FALLBACK_MODELS = ['meta-llama/llama-3.3-70b-instruct:free', 'mistralai/mistral-small-3.1-24b-instruct:free', 'deepseek/deepseek-chat-v3-0324:free'];
+async function llmCall(messages, timeoutMs) {
+  if (!env.llmKeys.length) return null;
+  const models = [env.llmModel, ...FALLBACK_MODELS.filter((m) => m !== env.llmModel)];
+  for (const model of models) {
+    const key = env.llmKeys[keyIdx++ % env.llmKeys.length];
+    try {
+      const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(timeoutMs),
+        body: JSON.stringify({ model, messages }),
+      });
+      if (!res.ok) {
+        const errTxt = await res.text().catch(() => '');
+        console.error('[llm] model failed:', model, res.status, errTxt.slice(0, 200));
+        continue;
+      }
+      const json = await res.json();
+      const content = json?.choices?.[0]?.message?.content?.trim();
+      if (content) return content;
+      console.error('[llm] empty content:', model);
+    } catch (e) {
+      console.error('[llm] call error:', model, e?.message || e);
+    }
+  }
+  return null;
+}
+
 export async function freeChat(user, prompt, history = []) {
   const limit = Number(await getConfig('FREE_LLM_DAILY_LIMIT', 100));
   if (await usageToday(user.id, 'llm') >= limit) {
     return 'Aaj ka free AI limit khatm ho gaya hai. Kal phir aana, ya apna khud ka AI Bot bana lo — menu me option 1 hai.';
   }
-  const key = env.llmKeys[keyIdx++ % Math.max(env.llmKeys.length, 1)];
-  if (!key) return 'AI abhi set nahi hua hai. Thodi der me phir try karo.';
-  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: env.llmModel,
-      messages: [
-        { role: 'system', content: MASTER_INSTRUCTION },
-        ...history.slice(-6), { role: 'user', content: prompt },
-      ],
-    }),
-  });
-  if (!res.ok) return 'AI abhi busy hai — ek minute me phir try karo.';
-  const json = await res.json();
+  if (!env.llmKeys.length) return 'AI abhi set nahi hua hai. Thodi der me phir try karo.';
+  const content = await llmCall([
+    { role: 'system', content: MASTER_INSTRUCTION },
+    ...history.slice(-6), { role: 'user', content: prompt },
+  ], 30000);
+  if (!content) return 'AI abhi busy hai — ek minute me phir try karo.';
   await logUsage(user.id, 'llm');
-  return json?.choices?.[0]?.message?.content?.trim() || 'Kuch gadbad ho gayi, phir try karo.';
+  return content;
 }
 
 // AGENT DECIDE (2026-11-06, Hero ka order: "har page par agentic mode"):
@@ -46,25 +73,14 @@ export async function agentDecide(user, { step, answers = {}, text }) {
   try {
     const limit = Number(await getConfig('FREE_LLM_DAILY_LIMIT', 100));
     if (await usageToday(user.id, 'llm') >= limit) return null;
-    const key = env.llmKeys[keyIdx++ % Math.max(env.llmKeys.length, 1)];
-    if (!key) return null;
-    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-      signal: AbortSignal.timeout(15000),
-      body: JSON.stringify({
-        model: env.llmModel,
-        messages: [
-          { role: 'system', content: AGENT_SYSTEM },
-          { role: 'user', content: `STEP: ${step}\nANSWERS SO FAR: ${JSON.stringify(answers)}\nUSER MESSAGE: ${text}` },
-        ],
-      }),
-    });
-    if (!res.ok) return null;
-    const json = await res.json();
+    if (!env.llmKeys.length) return null;
+    const content = await llmCall([
+      { role: 'system', content: AGENT_SYSTEM },
+      { role: 'user', content: `STEP: ${step}\nANSWERS SO FAR: ${JSON.stringify(answers)}\nUSER MESSAGE: ${text}` },
+    ], 15000);
+    if (!content) return null;
     await logUsage(user.id, 'llm');
-    const raw = json?.choices?.[0]?.message?.content?.trim() || '';
-    const m = raw.match(/\{[\s\S]*\}/);
+    const m = content.match(/\{[\s\S]*\}/);
     if (!m) return null;
     const d = JSON.parse(m[0]);
     if (!d || !['set_field', 'choose', 'answer', 'unclear'].includes(d.action)) return null;
@@ -82,23 +98,13 @@ export async function workWrite(user, { kind, brief, business }) {
   try {
     const limit = Number(await getConfig('FREE_LLM_DAILY_LIMIT', 100));
     if (await usageToday(user.id, 'llm') >= limit) return null;
-    const key = env.llmKeys[keyIdx++ % Math.max(env.llmKeys.length, 1)];
-    if (!key) return null;
-    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-      signal: AbortSignal.timeout(60000),
-      body: JSON.stringify({
-        model: env.llmModel,
-        messages: [
-          { role: 'system', content: WORK_SYSTEM },
-          { role: 'user', content: `KIND: ${kind}\nBUSINESS: ${business || 'nahi diya'}\nBRIEF: ${brief}` },
-        ],
-      }),
-    });
-    if (!res.ok) return null;
-    const json = await res.json();
+    if (!env.llmKeys.length) return null;
+    const content = await llmCall([
+      { role: 'system', content: WORK_SYSTEM },
+      { role: 'user', content: `KIND: ${kind}\nBUSINESS: ${business || 'nahi diya'}\nBRIEF: ${brief}` },
+    ], 60000);
+    if (!content) return null;
     await logUsage(user.id, 'llm');
-    return json?.choices?.[0]?.message?.content?.trim() || null;
+    return content;
   } catch { return null; }
 }
