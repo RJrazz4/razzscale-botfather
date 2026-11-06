@@ -422,7 +422,13 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
   }
 
   // ===== Typed music search =====
-  if (state === 'music_query' && t) {
+  // music_done bhi (2026-11-06, Hero ki report): gaana bajne ke baad user seedha
+  // agle gaane ka naam likhta hai ('Dilnashi dilnashi songs') — use Main Menu par
+  // phenkna galat tha, user wahin confuse hota hai. Music wali gali chipki
+  // rahegi: typed naam = nayi khoj. ('menu'/'hi' greeting, 'lyrics', numbers aur
+  // music_new wala button upar pehle hi handle ho chuke hain — wohi escape
+  // rahenge; ye branch sirf bacha hua aam text pakadti hai.)
+  if ((state === 'music_query' || state === 'music_done') && t) {
     await runMusicSearch(ctx, t, 'search');
     return;
   }
