@@ -27,8 +27,9 @@ export const WORK_KINDS = {
 const KIND_KEYS = Object.keys(WORK_KINDS);
 const KIND_NUM_LABELS = Object.fromEntries(KIND_KEYS.map((k, i) => [i + 1, WORK_KINDS[k]]));
 // Bhaari kaam ke pakke shabd — brief me ye dikhe to seedha VIP rasta
-// (agent se pehle ki sasti, pakki chaal).
-const HEAVY_WORDS = ['bot ban', 'bot chahiye', 'website', 'app ban', 'automation', 'software', 'crm', 'dashboard', 'video series', 'har roz video', 'daily video', 'poora system'];
+// (agent se pehle ki sasti, pakki chaal). Web darwaza (webDoor.js) bhi yahi
+// list use karta hai — ek hi filter, dono darwaze.
+export const HEAVY_WORDS = ['bot ban', 'bot chahiye', 'website', 'app ban', 'automation', 'software', 'crm', 'dashboard', 'video series', 'har roz video', 'daily video', 'poora system'];
 
 export function isOwner(from) {
   return String(from || '').replace(/\D/g, '') === env.ownerWaNumber;
