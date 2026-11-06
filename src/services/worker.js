@@ -7,12 +7,22 @@ import * as graph from './graph-cloud.js';
 import * as telegram from './telegram.js';
 import { getAudioForVideo, searchSongs } from './music.js';
 import { getFreshUrl, withQuality } from './jiosaavn.js';
-import { freeChat } from './llm.js';
+import { freeChat, workWrite } from './llm.js';
+import { notifyOwner } from './owner.js';
 
 // Async Worker (Architecture V2.1, plan §3): heavy kaam (music download, AI chat) webhook handler
 // se bahar, SQLite jobs table ke peeche. Idempotency: ek idempotency_key wala kaam do baar nahi bhejta.
-const TIMEOUTS = { music_download: 240_000, ai_chat: 120_000, lyrics: 30_000 };
+const TIMEOUTS = { music_download: 240_000, ai_chat: 120_000, lyrics: 30_000, likhai_work: 120_000 };
 const MAX_ATTEMPTS = 2;
+
+// ⭐ Escalation ki shabd-pakad (v1): Boss/insaan se baat, ya action-level
+// banwane ki maang. Jhooti pakad (false positive) par bhi customer ko sahi
+// rasta hi milta hai — isiliye ye sasti chaal surakshit hai.
+const ESCALATION_WORDS = ['boss', 'insaan se', 'insan se', 'malik se', 'owner se', 'baat karao', 'baat karwa', 'milao', 'mila do', 'call kar', 'number do', 'number batao', 'bot banwa', 'bot banana hai', 'website banwa', 'app banwa', 'automation karwa', 'tum bana do', 'aap bana do', 'khud kar do'];
+function isEscalation(text = '') {
+  const l = String(text).toLowerCase();
+  return ESCALATION_WORDS.some((w) => l.includes(w));
+}
 let timer = null;
 let ticking = false;
 
@@ -361,13 +371,68 @@ const EXECUTORS = {
     // (masterMenu enqueue ke waqt pehle hi ek quick composing bhejta hai — ye use refresh rakhta hai.)
     await evo.sendPresence(p.instance, p.to, 'composing', 15000).catch(() => {});
     try {
+      // ⭐ ESCALATION (2026-11-06, Hero ka niyam): baat Boss/action-level ki
+      // ho to AI ke ghumane ki jagah pakka rasta — customer ko saaf jawab,
+      // aur Boss ke WhatsApp par turant khabar (number + maang), deal Boss
+      // close karega. Pakad abhi shabdon se hai (sasti, chaabi ke bina bhi
+      // chalti hai); chaabi lagne par agent-wali pehchan iske upar judegi.
+      if (isEscalation(p.text)) {
+        await evo.sendText(p.instance, p.to,
+          'Ye wala kaam mere *Boss RazzScale* khud karte hain — maine unhe tumhari khabar bhej di hai ✅\nWoh apne WhatsApp se tumse baat karenge. Jaldi ho to tum bhi unhe message kar sakte ho: +91 72051 91890\n\nMenu ke liye *menu* likh do.');
+        await notifyOwner(p.instance,
+          `🔔 *Nayi deal wali baat!*\n👤 Customer: +${String(p.to).replace(/\D/g, '')}\n💬 Maang: "${String(p.text || '').slice(0, 200)}"\n\nCustomer ko bol diya hai ki tum sampark karoge — deal yahin se close karo 👍`)
+          .catch(() => {});
+        if (p.userId) await logUsage(p.userId, 'escalation').catch(() => {});
+        return;
+      }
       const reply = await freeChat({ id: p.userId }, p.text);
       await evo.sendText(p.instance, p.to, reply, { ad: true });
     } finally {
       await evo.sendPresence(p.instance, p.to, 'paused', 1000).catch(() => {});
     }
   },
+  async likhai_work(p) {
+    // WORKPLACE v1 (likhai): kaam banao → jobs row me result save → customer
+    // ko 'taiyaar hai' ki khabar → Boss ko approval buttons. Delivery Boss ke
+    // tap ke baad hi hoti hai (handlers/workplace.js → handleOwnerWork).
+    await evo.sendPresence(p.instance, p.to, 'composing', 15000).catch(() => {});
+    const out = await workWrite({ id: p.userId }, { kind: p.workKind, brief: p.brief });
+    if (!out) {
+      await evo.sendText(p.instance, p.to, 'Maaf karo, ye kaam abhi nahi ban paya 😔 — thodi der me dobara try karo, ya VIP section se Boss se baat kar lo.');
+      return;
+    }
+    if (out.startsWith('CLARIFY:')) {
+      await evo.sendText(p.instance, p.to, `Ek chhoti si baat aur bata do, phir kaam pakka banega 🙏\n${out.replace('CLARIFY:', '').trim()}\n\n(Jawab ke saath menu se *Kaam Karwao* wala order dobara de dena.)`);
+      return;
+    }
+    await pool.query('update jobs set result=$2 where idempotency_key=$1', [`work:${p.orderId}`, out]).catch(() => {});
+    try {
+      const { rows } = await pool.query('select payload from jobs where idempotency_key=$1', [`work:${p.orderId}`]);
+      const pl = rows[0] ? (typeof rows[0].payload === 'string' ? JSON.parse(rows[0].payload) : rows[0].payload) : {};
+      pl.stage = 'ready';
+      await pool.query('update jobs set payload=$2 where idempotency_key=$1', [`work:${p.orderId}`, JSON.stringify(pl)]);
+    } catch { /* stage na lage to bhi worklist result se hi pehchan lega */ }
+    await evo.sendText(p.instance, p.to, '✅ *Tumhara kaam taiyaar hai!*\nEk aakhri quality jaanch ke baad yahin bhej raha hoon — bas kuch der 🙏');
+    await notifyOwnerForApproval(p, out).catch((e) => console.error('[work] owner notify fail:', e?.message || e));
+  },
 };
+
+// Workplace: taiyaar kaam ki approval-khabar Boss (owner) ko buttons ke saath.
+// Fail ho to sirf log — kaam jobs row me pada hai, Boss 'worklist' se utha lega.
+async function notifyOwnerForApproval(p, workText) {
+  const body = `✍️ *Naya kaam taiyaar hai* — Order ${p.orderId}\n📝 Kaam: ${p.workKind}\n📋 Brief: ${String(p.brief || '').slice(0, 120)}\n\n—— Taiyaar likhai ——\n${workText}\n\nPakka ho to *Bhej do* tap karo — customer ko yahi bhej dunga.`;
+  if (p.instance === evo.CLOUD_INSTANCE) {
+    const sent = await graph.sendButtons(env.ownerWaNumber, {
+      body,
+      buttons: [
+        { id: `work_ok_${p.orderId}`, title: '✅ Bhej do' },
+        { id: `work_no_${p.orderId}`, title: '❌ Radd' },
+      ],
+    }).catch(() => false);
+    if (sent) return;
+  }
+  await evo.sendText(p.instance, `${env.ownerWaNumber}@s.whatsapp.net`, body + '\n\n(Approval ke liye bot ko "worklist" likho.)');
+}
 
 const FAILURE_TEXT = {
   lyrics: { type: 'text', text: 'Is gaane ke lyrics nahi mile 😔' },
