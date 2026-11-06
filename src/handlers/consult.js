@@ -1,6 +1,7 @@
 import * as evo from '../services/transport.js';
 import { setFlow, logUsage, pool } from '../db/pool.js';
 import { agentDecide } from '../services/llm.js';
+import { notifyOwner } from '../services/owner.js';
 
 // VIP CONSULTATION (FRONTEND BRIEF V1.0, docs/FRONTEND-BRIEF-PLAN.md):
 // Guided consultation state machine — service chuno → (branch: social platforms/features
@@ -260,6 +261,11 @@ export async function handleConsult(ctx) {
     await pauseForHuman(from).catch((e) => console.error('[consult] human-mode pause:', e?.message || e));
     await setFlow(user.id, 'master', { step: 'menu' });
     await evo.sendText(inst, from, buildConfirmedMessage(leadId, a));
+    // ⭐ Escalation niyam (2026-11-06): pakki lead ki khabar Boss ke personal
+    // WhatsApp par bhi — deal woh apni taraf se bhi sambhal sakta hai.
+    await notifyOwner(inst,
+      `🔔 *Nayi VIP lead pakki!* (Lead ID: ${leadId})\n👤 Customer: +${String(from).replace(/\D/g, '')}\n🔧 Service: ${a.service || 'nahi diya'}\n🏢 Business: ${a.business || 'nahi diya'}\n📝 Requirement: ${a.requirement || 'nahi diya'}\n\nCustomer isi chat me tumhara intezaar kar raha hai (bot 12h peeche hai).`)
+      .catch(() => {});
   };
   const doCancel = async () => {
     await setFlow(user.id, 'master', { step: 'menu' });
