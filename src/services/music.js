@@ -14,12 +14,14 @@ const FFMPEG = process.env.FFMPEG_BIN || ffmpegStatic || 'ffmpeg';
 // KDMusic-style UX (2026-10-24): master bot ab top 8 lata hai (pages of 3 + "more").
 // Cache key me limit shamil hai taaki 3-wali aur 8-wali khoj ek dusre ko na kaatein.
 export async function searchSongs(query, limit = 8) {
-  const hash = crypto.createHash('sha256').update(`${limit}:${query.toLowerCase().trim()}`).digest('hex');
+  const hash = crypto.createHash('sha256').update(`v2:${limit}:${query.toLowerCase().trim()}`).digest('hex');
   const { rows } = await pool.query('select results from music_cache where query_hash=$1', [hash]);
   if (rows[0]) return rows[0].results;
   const { stdout } = await run(env.ytdlp, ['-J', '--flat-playlist', '--no-warnings', `ytsearch${limit}:${query}`], { timeout: 45_000, maxBuffer: 8 * 1024 * 1024 });
   const json = JSON.parse(stdout);
-  const results = (json.entries || []).slice(0, limit).map(e => ({ id: e.id, title: e.title, duration: e.duration || null, url: `https://www.youtube.com/watch?v=${e.id}` }));
+  // channel + viewCount bhi rakho (2026-11-06): merged ranking ko official
+  // channel (T-Series aadi) aur views ki taakat naapne ke liye chahiye.
+  const results = (json.entries || []).slice(0, limit).map(e => ({ id: e.id, title: e.title, duration: e.duration || null, url: `https://www.youtube.com/watch?v=${e.id}`, channel: e.channel || e.uploader || '', viewCount: Number(e.view_count) || 0 }));
   await pool.query('insert into music_cache (query_hash, query_text, results) values ($1,$2,$3) on conflict do nothing',
     [hash, query, JSON.stringify(results)]);
   return results;
