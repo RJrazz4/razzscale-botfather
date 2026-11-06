@@ -385,7 +385,12 @@ const EXECUTORS = {
         if (p.userId) await logUsage(p.userId, 'escalation').catch(() => {});
         return;
       }
-      const reply = await freeChat({ id: p.userId }, p.text);
+      let reply = await freeChat({ id: p.userId }, p.text);
+      // Dimag busy/set-na-ho par user ko band gali me mat chhodo — menu ka
+      // rasta har aise jawab ke saath (Hero ka "menu hamesha dikhe" niyam).
+      if (/busy hai|set nahi hua|limit khatm/.test(reply)) {
+        reply += '\n\nTab tak menu se kaam chala lo — *menu* likho, saare option tap karke khul jayenge.';
+      }
       await evo.sendText(p.instance, p.to, reply, { ad: true });
     } finally {
       await evo.sendPresence(p.instance, p.to, 'paused', 1000).catch(() => {});
