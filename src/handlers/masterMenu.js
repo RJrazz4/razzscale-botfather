@@ -451,6 +451,20 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
     return;
   }
 
+  // ===== Default: AGENT MODE (2026-11-06, Hero ka order: "har page par agentic") =====
+  // Home (menu state) par anjaan free-text ab menu dobara nahi phenkta — user
+  // jo bole woh seedha AI brain ko jata hai (wahi dimag jo AI Chat lane me
+  // hai: services samjhata hai, sawalon ke jawab deta hai). State ai_chat ho
+  // jata hai taaki baat aage bhi chalti rahe; 'menu' likhna = kabhi bhi bahar.
+  if (state === 'menu' && t) {
+    await setFlow(user.id, 'master', { step: 'ai_chat' }, FLOW_TTL);
+    await evo.sendPresence(inst, from, 'composing', 30000).catch(() => {});
+    await enqueueJob('ai_chat',
+      { instance: inst, to: from, userId: user.id, text: t },
+      `ai:${msgId || `${user.id}:${Date.now()}`}`);
+    return;
+  }
+
   // ===== Default: home menu (dead end kabhi nahi) =====
   await setFlow(user.id, 'master', { step: 'menu' });
   await sendHomeMenu(inst, from);
