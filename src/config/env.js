@@ -13,8 +13,16 @@ export const env = {
   // (woh master BOT ka apna link hai). Default wahi number jo handlers/vip.js me pehle se hai.
   ownerWaNumber: (process.env.OWNER_WA_NUMBER || '917205191890').replace(/\D/g, ''),
   adminWaId: process.env.ADMIN_WA_ID || '',
-  llmKeys: [process.env.OPENROUTER_API_KEY, process.env.OPENROUTER_API_KEY2].filter(Boolean),
+  // LLM gateway (2026-11-06): default OpenRouter. LLM_API_KEY set ho to
+  // gateway mode — sirf wahi key chalegi (alag provider ki keys ek doosre
+  // ke yahan bekar hoti hain, isiliye milana nahi hai). LLM_BASE_URL se
+  // rasta badalta hai (OpenAI-compatible koi bhi gateway chal sakta hai).
+  llmKeys: (process.env.LLM_API_KEY
+    ? [process.env.LLM_API_KEY]
+    : [process.env.OPENROUTER_API_KEY, process.env.OPENROUTER_API_KEY2]).filter(Boolean),
+  llmBaseUrl: (process.env.LLM_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/$/, ''),
   llmModel: process.env.FREE_LLM_MODEL || 'google/gemma-3-27b-it:free',
+  llmFallbacks: (process.env.LLM_FALLBACK_MODELS || 'meta-llama/llama-3.3-70b-instruct:free,mistralai/mistral-small-3.1-24b-instruct:free,deepseek/deepseek-chat-v3-0324:free').split(',').map((s) => s.trim()).filter(Boolean),
   ytdlp: process.env.YTDLP_BIN || 'yt-dlp',
   musicTmp: process.env.MUSIC_TMP_DIR || '/tmp/razz-music',
   ffmpeg: process.env.FFMPEG_BIN || 'ffmpeg',
