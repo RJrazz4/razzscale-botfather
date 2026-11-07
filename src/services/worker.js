@@ -7,7 +7,7 @@ import * as graph from './graph-cloud.js';
 import * as telegram from './telegram.js';
 import { getAudioForVideo, searchSongs, noteDownloadFailure, initYtdlp, getAudioForScTrack, searchSongsSc } from './music.js';
 import { getFreshUrl, withQuality, searchSongsSaavn } from './jiosaavn.js';
-import { isSongLength, pickSaavnRescue, pickAltUpload, rescueQueryFromTitle } from './musicSearch.js';
+import { isSongLength, pickSaavnRescue, pickAltUpload, pickAltUploads, rescueQueryFromTitle } from './musicSearch.js';
 import { markSent } from './musicMemory.js';
 import { startSeeder } from './librarySeeder.js';
 import { freeChat, workWrite } from './llm.js';
@@ -15,7 +15,7 @@ import { notifyOwner } from './owner.js';
 
 // Async Worker (Architecture V2.1, plan §3): heavy kaam (music download, AI chat) webhook handler
 // se bahar, SQLite jobs table ke peeche. Idempotency: ek idempotency_key wala kaam do baar nahi bhejta.
-const TIMEOUTS = { music_download: 240_000, music_prefetch: 240_000, ai_chat: 120_000, lyrics: 30_000, likhai_work: 120_000 };
+const TIMEOUTS = { music_download: 330_000, music_prefetch: 240_000, ai_chat: 120_000, lyrics: 30_000, likhai_work: 120_000 };
 const MAX_ATTEMPTS = 2;
 
 // ⭐ Escalation ki shabd-pakad (v1): Boss/insaan se baat, ya action-level
@@ -327,7 +327,7 @@ function audioMimeFor(file) {
   return 'audio/mp4'; // .m4a ka WhatsApp-naam
 }
 
-async function deliverYtTrackCloud(p) {
+async function deliverYtTrackCloud(p, opts = {}) {
   // Pehla rasta: cache wali media_id — sabse tez, koi download/upload nahi.
   const cached = await getWaMediaId(p.videoId).catch(() => null);
   if (cached) {
@@ -338,7 +338,7 @@ async function deliverYtTrackCloud(p) {
   // File lao: getAudioForVideo media_vault (Telegram backup) pehle dekhta
   // hai, warna yt-dlp se download karke vault me bhi rakh deta hai — ek baar
   // aaya gaana hamesha ke liye backup (Hero ki maang, 2026-11-07).
-  const file = await getAudioForVideo(p.videoId, p.title);
+  const file = await getAudioForVideo(p.videoId, p.title, opts);
   let size = 0;
   try { size = fs.statSync(file).size; } catch { throw new Error('yt_cloud_file_missing'); }
   if (!size || size > WHATSAPP_MAX) throw new Error('yt_cloud_too_large');
@@ -352,7 +352,7 @@ async function deliverYtTrackCloud(p) {
 // ---------- CLOUD par SoundCloud gaane ki delivery (2026-11-07) ----------
 // YT wali hi kataar (media_id cache -> file -> Meta upload -> send), par
 // chaabi 'sc:<id>' namespace me aur file getAudioForScTrack se aati hai.
-async function deliverScTrackCloud(p) {
+async function deliverScTrackCloud(p, timeoutMs = 120_000) {
   const scId = p.scId || p.videoId;
   const cacheKey = `sc:${scId}`;
   const cached = await getWaMediaId(cacheKey).catch(() => null);
@@ -361,7 +361,7 @@ async function deliverScTrackCloud(p) {
     if (sent) return;
     await clearWaMediaId(cacheKey).catch(() => {});
   }
-  const file = await getAudioForScTrack(scId, p.url, p.title);
+  const file = await getAudioForScTrack(scId, p.url, p.title, timeoutMs);
   let size = 0;
   try { size = fs.statSync(file).size; } catch { throw new Error('sc_cloud_file_missing'); }
   if (!size || size > WHATSAPP_MAX) throw new Error('sc_cloud_too_large');
@@ -379,19 +379,19 @@ async function deliverScTrackCloud(p) {
 // (history ke liye). Na mile to throw — asal fail wala rasta hi aage chalega.
 // Rescue ke liye: koi YT video dono transport par bhejo — Cloud par media
 // upload wala rasta (deliverYtTrackCloud), Evolution par file/base64 wala.
-async function deliverYtAny(p, videoId, url) {
+async function deliverYtAny(p, videoId, url, opts = {}) {
   const p2 = { ...p, source: 'yt', videoId, url, songId: undefined };
-  if (p.instance === evo.CLOUD_INSTANCE) { await deliverYtTrackCloud(p2); return; }
-  const file = await getAudioForVideo(videoId, p.title);
+  if (p.instance === evo.CLOUD_INSTANCE) { await deliverYtTrackCloud(p2, opts); return; }
+  const file = await getAudioForVideo(videoId, p.title, opts);
   await evo.sendPresence(p.instance, p.to, 'recording', 30000).catch(() => {});
   const b64 = fs.readFileSync(file).toString('base64');
   await evo.sendMedia(p.instance, p.to, b64, p.title, 'audio', { footer: true });
 }
 
-async function deliverScAny(p, scTrack) {
+async function deliverScAny(p, scTrack, timeoutMs = 120_000) {
   const p2 = { ...p, source: 'soundcloud', scId: scTrack.id, videoId: undefined, url: scTrack.url };
-  if (p.instance === evo.CLOUD_INSTANCE) { await deliverScTrackCloud(p2); return; }
-  const file = await getAudioForScTrack(scTrack.id, scTrack.url, scTrack.title);
+  if (p.instance === evo.CLOUD_INSTANCE) { await deliverScTrackCloud(p2, timeoutMs); return; }
+  const file = await getAudioForScTrack(scTrack.id, scTrack.url, scTrack.title, timeoutMs);
   await evo.sendPresence(p.instance, p.to, 'recording', 30000).catch(() => {});
   const b64 = fs.readFileSync(file).toString('base64');
   await evo.sendMedia(p.instance, p.to, b64, p.title, 'audio', { footer: true });
@@ -425,27 +425,46 @@ async function rescueDeliver(p) {
     console.log('[music] rescue: -> Saavn se aaya:', hit.id);
     return;
   }
-  // (2) Wahi gaana, DUSRA YouTube upload — kharab upload par atke rehne se
-  // dusra upload aksar chal jata hai (alag video, alag haal). Samay bacha
-  // ho tabhi — user ko kul intezaar ghataana hi is poore fix ka maksad hai.
-  if (elapsed() < 90_000) {
-    const alts = await searchSongs(rescueQueryFromTitle(p.title) || p.title, 8).catch(() => []);
-    const alt = pickAltUpload(alts, p.videoId);
-    if (alt) {
-      await deliverYtAny(p, alt.id, alt.url);
-      p.rescuedSource = 'yt'; p.rescuedId = alt.id; p.videoId = undefined;
-      console.log('[music] rescue: -> dusre YT upload se aaya:', alt.id);
+  // (2) LIST KE DUSRE UPLOADS — user ki apni list me usi gaane ke aur
+  // uploads the (payload.altIds, masterMenu bhejta hai). Ye sabse ummeed
+  // wala rasta hai: khoj wahi, gaana wahi, sirf upload dusra. Ek-ek karke
+  // TEZ (fast) chain se parkho — jo chal jaye wahi jeet.
+  const tried = new Set([p.videoId]);
+  const altIds = Array.isArray(p.altIds) ? p.altIds : [];
+  for (const altId of altIds.slice(0, 3)) {
+    if (!altId || tried.has(altId)) continue;
+    tried.add(altId);
+    if (elapsed() > 200_000) break;
+    try {
+      await deliverYtAny(p, altId, undefined, { fast: true });
+      p.rescuedSource = 'yt'; p.rescuedId = altId; p.videoId = undefined;
+      console.log('[music] rescue: -> list ke dusre upload se aaya:', altId);
       return;
+    } catch { console.log('[music] rescue: list upload fail:', altId); }
+  }
+  // (3) Khoj se aur dusre uploads (2 tak) — wahi chaal, taazi khoj par.
+  if (elapsed() < 180_000) {
+    const alts = pickAltUploads(await searchSongs(rescueQueryFromTitle(p.title) || p.title, 8).catch(() => []), [...tried], 2);
+    for (const alt of alts) {
+      tried.add(alt.id);
+      if (elapsed() > 200_000) break;
+      try {
+        await deliverYtAny(p, alt.id, alt.url, { fast: true });
+        p.rescuedSource = 'yt'; p.rescuedId = alt.id; p.videoId = undefined;
+        console.log('[music] rescue: -> khoj ke dusre upload se aaya:', alt.id);
+        return;
+      } catch { console.log('[music] rescue: khoj upload fail:', alt.id); }
     }
   }
-  // (3) SoundCloud par wahi gaana — wahan bhi extraction ki deewaar nahi.
-  // Jo SC track abhi fail hua hai use dobara nahi uthayenge.
-  if (elapsed() < 120_000) {
+  // (4) SoundCloud par wahi gaana — wahan bhi extraction ki deewaar nahi.
+  // Jo SC track abhi fail hua hai use dobara nahi uthayenge. Download par
+  // 60s ki hadd — deri chalegi, par job ki kul hadd ke andar rehna hai.
+  if (elapsed() < 230_000) {
     const scHits = await searchSongsSc(rescueQueryFromTitle(p.title) || p.title, 6).catch(() => []);
     const failedScId = p.source === 'soundcloud' ? (p.scId || p.videoId) : null;
     const sc = (scHits || []).find((h) => h?.id && h.id !== failedScId && isSongLength(h));
     if (sc) {
-      await deliverScAny(p, sc);
+      await deliverScAny(p, sc, 60_000);
       p.rescuedSource = 'soundcloud'; p.rescuedId = sc.id; p.videoId = undefined;
       console.log('[music] rescue: -> SoundCloud se aaya:', sc.id);
       return;
