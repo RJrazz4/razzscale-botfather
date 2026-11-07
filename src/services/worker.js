@@ -120,7 +120,7 @@ async function sendMusicActionList(instance, to, ok) {
   const sent = await evo.sendList(instance, to, {
     title: ok ? '🎵 Gaana mil gaya!' : '🎵 Gaana nahi aaya',
     buttonText: 'Options Dekho',
-    description: 'Ab kya karna hai? Ek option tap karo 👇',
+    description: ok ? 'Ab kya karna hai? Ek option tap karo 👇' : 'Ye gaana nahi aa paya 😔 — wahi list se koi aur gaana chuno, ya naya gaana search karo 👇',
     sections: [{ title: 'Gaane ke options', rows }],
   }).catch(() => null);
   return Boolean(sent);
@@ -490,7 +490,7 @@ async function sendMusicActionButtons(to, ok) {
       { id: 'menu', title: '🏠 Menu' },
     ];
   const sent = await graph.sendButtons(to, {
-    body: ok ? '🎵 Gaana mil gaya! Ab kya karna hai? Ek option tap karo 👇' : '🎵 Gaana nahi aaya. Aur kya karna hai? 👇',
+    body: ok ? '🎵 Gaana mil gaya! Ab kya karna hai? Ek option tap karo 👇' : 'Ye gaana nahi aa paya 😔 — wahi list se koi aur gaana chuno, ya naya gaana search karo 👇',
     buttons,
   }).catch(() => false);
   return Boolean(sent);
@@ -653,10 +653,13 @@ const EXECUTORS = {
       let reply = await freeChat({ id: p.userId }, p.text);
       // Dimag busy/set-na-ho par user ko band gali me mat chhodo — menu ka
       // rasta har aise jawab ke saath (Hero ka "menu hamesha dikhe" niyam).
-      if (/busy hai|set nahi hua|limit khatm/.test(reply)) {
+      // Error/fallback jawab par AD KABHI NAHI (2026-11-07 raat, Hero ki
+      // report): atke hue user ko vigyapan sabse zyada chubhta hai.
+      const isFallback = /busy hai|set nahi hua|limit khatm/.test(reply);
+      if (isFallback) {
         reply += '\n\nTab tak menu se kaam chala lo — *menu* likho, saare option tap karke khul jayenge.';
       }
-      await evo.sendText(p.instance, p.to, reply, { ad: true });
+      await evo.sendText(p.instance, p.to, reply, isFallback ? {} : { ad: true });
     } finally {
       await evo.sendPresence(p.instance, p.to, 'paused', 1000).catch(() => {});
     }
@@ -731,8 +734,9 @@ const FAILURE_TEXT = {
 // (Results flow me rehte hain — tick() failure par moveBusyState unhe
 // music_zone tak carry karta hai, isliye music_list yahan kaam karta hai.)
 async function sendMusicFailure(p) {
-  const text = 'Ye gaana nahi aa paya 😔 — wahi list se koi aur gaana chuno, ya naya gaana search karo.';
-  await evo.sendText(p.instance, p.to, text).catch(() => {});
+  // EK HI message (2026-11-07 raat, Hero ki report): pehle fail par text +
+  // buttons/list DO alag messages jate the — chat bharti thi, user confuse
+  // hota tha. Ab fail ki baat buttons/list ke body me hi hai, ek message.
   if (p.instance === evo.CLOUD_INSTANCE) { await sendMusicActionButtons(p.to, false); return; }
   await sendMusicActionList(p.instance, p.to, false);
 }
