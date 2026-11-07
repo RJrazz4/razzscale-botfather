@@ -30,11 +30,13 @@ export function scoreYtTrack(track, query, position = 0, total = 8) {
   const allText = `${titleF} ${channelF}`;
   const overlap = queryOverlap(query, track.title || '');
   const views = Number(track.viewCount) || 0;
+  // YouTube ke auto-generated "Artist - Topic" channel bhi official hain.
+  const majorCh = MAJOR_CHANNEL_WORDS.some((w) => channelF.includes(w)) || /-\s*topic$/.test(channelF) || channelF.endsWith(' topic');
   let score = 4 * overlap;
   // Views mile to wahi asli taakat hai; na mile (purana cache) to YouTube ke
   // apne kram par halka bharosa — pehle wale natije ko thoda zyada.
   score += views > 0 ? 1.15 * Math.log10(views + 1) : Math.max(0, 3.2 - position * 0.35);
-  if (MAJOR_CHANNEL_WORDS.some((w) => channelF.includes(w))) score += 1.2;
+  if (majorCh) score += 1.2;
   // CANONICAL (2026-11-07 raat): bade label ke channel par woh upload jiske
   // naam ke PEHLE hisse ke saare khaas shabd user ki khoj me hain, wohi us
   // gaane ka asli upload hai (T-Series ka "Zaroorat" — title ke aage film/
@@ -47,8 +49,13 @@ export function scoreYtTrack(track, query, position = 0, total = 8) {
     const firstSeg = (track.title || '').split('|')[0].split(' - ')[0];
     const tD = distinctiveWords(firstSeg).map((w) => looseFold(w));
     const segMatch = tD.length > 0 && tD.every((w) => qD.some((qw) => qw === w || (qw.length >= 4 && w.length >= 4 && (qw.includes(w) || w.includes(qw)))));
-    if (segMatch && MAJOR_CHANNEL_WORDS.some((w) => channelF.includes(w))) score += 3.5;
+    if (segMatch && majorCh) score += 3.5;
   }
+  // Halki views-sazaa (2026-11-07 raat): bade label ke bina aur 50,000 se
+  // kam views wala upload aksar local re-upload/clickbait hota hai — HATAO
+  // mat (naye/chhote asli gaane bhi hote hain), sirf neeche dabao. Views ka
+  // data hi na ho (0) to koi sazaa nahi — ghayab data gunaah nahi.
+  if (views > 0 && views < 50000 && !majorCh) score -= 1.5;
   if (allText.includes('official')) score += 0.5;
   // ⭐ OFFICIAL CHANNEL PEHCHAN (Hero, 2026-11-06 raat — Telegram wale music
   // boton wala jugaad): gaana usi ke channel se pehle mile jiska woh hai —
