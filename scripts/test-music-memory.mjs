@@ -87,5 +87,16 @@ check('10. Recently Played me A ke 3 gaane, tazaa (YT9) sabse upar', recent.leng
 recent = await getRecent(B, 8);
 check('10b. dusre user ki Recently Played khaali', recent.length === 0);
 
+
+// Case 8 (2026-11-07 raat, LIVE bhajan galti): bheja hua BHAJAN sirf isliye
+// repeat na bane ki uske naam me film-gaane wale shabd hain — exact daawa.
+const E = 'user-E';
+await recordPick({ userId: E, waId: '91EEE', pick: { source: 'jiosaavn', id: 'S9', song: 'Maa Mujhe Teri Zaroorat Hai', title: 'Narendra Chanchal — Maa Mujhe Teri Zaroorat Hai', artist: 'Narendra Chanchal' }, query: 'Maa Mujhe Teri Zaroorat Hai' });
+await markSent(E, 'jiosaavn', 'S9');
+hit = await findRepeat(E, 'Mujhe Teri Jarurat Hai');
+check('8. bhajan (bheja hua) film-gaane ki khoj par repeat NAHI', hit === null);
+hit = await findRepeat(E, 'Maa Mujhe Teri Zaroorat Hai');
+check('8b. bhajan usi ke poore naam par repeat hit', !!hit && hit.provider_id === 'S9');
+
 console.log(`\nNatija: ${pass} pass, ${fail} fail`);
 process.exit(fail ? 1 : 0);
