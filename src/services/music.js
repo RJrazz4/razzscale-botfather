@@ -6,6 +6,7 @@ import crypto from 'node:crypto';
 import ffmpegStatic from 'ffmpeg-static';
 import { env } from '../config/env.js';
 import { pool } from '../db/pool.js';
+import { MAX_SONG_SEC } from './jiosaavn.js';
 import * as telegram from './telegram.js';
 const run = promisify(execFile);
 const FFMPEG = process.env.FFMPEG_BIN || ffmpegStatic || 'ffmpeg';
@@ -14,14 +15,18 @@ const FFMPEG = process.env.FFMPEG_BIN || ffmpegStatic || 'ffmpeg';
 // KDMusic-style UX (2026-10-24): master bot ab top 8 lata hai (pages of 3 + "more").
 // Cache key me limit shamil hai taaki 3-wali aur 8-wali khoj ek dusre ko na kaatein.
 export async function searchSongs(query, limit = 8) {
-  const hash = crypto.createHash('sha256').update(`v2:${limit}:${query.toLowerCase().trim()}`).digest('hex');
+  // v3 (2026-11-07): lambe-mix filter ke baad purana v2 cache bekaar — usme
+  // 1-ghante wale playlist phanse hue hain, woh dobara na aayen.
+  const hash = crypto.createHash('sha256').update(`v3:${limit}:${query.toLowerCase().trim()}`).digest('hex');
   const { rows } = await pool.query('select results from music_cache where query_hash=$1', [hash]);
   if (rows[0]) return rows[0].results;
-  const { stdout } = await run(env.ytdlp, ['-J', '--flat-playlist', '--no-warnings', `ytsearch${limit}:${query}`], { timeout: 45_000, maxBuffer: 8 * 1024 * 1024 });
+  // limit+4 isliye: lambe mix filter me nikal jayenge, peeche purti rahe.
+  const { stdout } = await run(env.ytdlp, ['-J', '--flat-playlist', '--no-warnings', `ytsearch${limit + 4}:${query}`], { timeout: 45_000, maxBuffer: 8 * 1024 * 1024 });
   const json = JSON.parse(stdout);
   // channel + viewCount bhi rakho (2026-11-06): merged ranking ko official
   // channel (T-Series aadi) aur views ki taakat naapne ke liye chahiye.
-  const results = (json.entries || []).slice(0, limit).map(e => ({ id: e.id, title: e.title, duration: e.duration || null, url: `https://www.youtube.com/watch?v=${e.id}`, channel: e.channel || e.uploader || '', viewCount: Number(e.view_count) || 0 }));
+  // 10-min cap se lambe mix/playlist yahin rok do (MAX_SONG_SEC).
+  const results = (json.entries || []).filter((e) => !(Number(e.duration) > MAX_SONG_SEC)).slice(0, limit).map(e => ({ id: e.id, title: e.title, duration: e.duration || null, url: `https://www.youtube.com/watch?v=${e.id}`, channel: e.channel || e.uploader || '', viewCount: Number(e.view_count) || 0 }));
   await pool.query('insert into music_cache (query_hash, query_text, results) values ($1,$2,$3) on conflict do nothing',
     [hash, query, JSON.stringify(results)]);
   return results;
