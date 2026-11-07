@@ -11,6 +11,70 @@ import * as telegram from './telegram.js';
 const run = promisify(execFile);
 const FFMPEG = process.env.FFMPEG_BIN || ffmpegStatic || 'ffmpeg';
 
+// ---------- yt-dlp binary: KHUD-TAAZA (2026-11-07) ----------
+// Logs ne jad batayi: production ka binary (env.ytdlp = bin/yt-dlp) ek
+// jagah band hai, aur YouTube har kuch hafton me player badal deta hai —
+// purana binary kuch videos par "player response" nahi nikaal pata, wahi
+// videos naye binary se turant khul jate hain. Hal: bot khud taaza yt-dlp
+// taiyaar rakhe — pehle repo wala jana-pehchana binary (tools/yt-dlp,
+// 2026.10.21), phir peeche se GitHub se SABSE NAYA download karke usi par
+// switch. Naya rasta fail ho to purana binary hi chalta rahega — bigadega
+// kuch nahi. --js-runtimes jaise naye flags SIRF pehchane hue (modern)
+// binary par lagte hain; anjaan binary par surakshit purane arguments hi.
+let binState = null; // { path, modern }
+let binInitStarted = false;
+
+export function ytdlpStatus() { return binState || { path: env.ytdlp, modern: false }; }
+
+export function initYtdlp() {
+  if (binInitStarted) return;
+  binInitStarted = true;
+  try {
+    const toolsBin = path.join(process.cwd(), 'tools', 'yt-dlp');
+    if (fs.existsSync(toolsBin)) binState = { path: toolsBin, modern: true };
+  } catch { /* ignore */ }
+  prepareFreshYtdlp().catch(() => {});
+}
+
+async function prepareFreshYtdlp() {
+  const dir = path.join(env.musicTmp, 'ytdlp-fresh');
+  const bin = path.join(dir, 'yt-dlp');
+  try {
+    if (fs.existsSync(bin)) {
+      const v = await run(bin, ['--version'], { timeout: 10_000 });
+      if (v.stdout?.trim()) {
+        binState = { path: bin, modern: true };
+        console.log('[music] taaza yt-dlp pehle se taiyaar:', v.stdout.trim());
+        return;
+      }
+    }
+  } catch { /* kharab file — neeche fresh download hoga */ }
+  await fs.promises.mkdir(dir, { recursive: true });
+  const res = await fetch('https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp',
+    { redirect: 'follow', signal: AbortSignal.timeout(60_000) });
+  if (!res.ok) throw new Error(`ytdlp_fetch_${res.status}`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length < 1_000_000) throw new Error('ytdlp_too_small');
+  const tmp = `${bin}.tmp`;
+  await fs.promises.writeFile(tmp, buf);
+  fs.chmodSync(tmp, 0o755);
+  const v = await run(tmp, ['--version'], { timeout: 15_000 });
+  if (!v.stdout?.trim()) throw new Error('ytdlp_no_version');
+  await fs.promises.rename(tmp, bin);
+  binState = { path: bin, modern: true };
+  console.log('[music] taaza yt-dlp taiyaar:', v.stdout.trim());
+}
+
+/** Download ke arguments — modern binary par JS-runtime wala hathiyaar bhi
+ *  (bina JS runtime ke YouTube kuch videos ka player jawab deta hi nahi;
+ *  server par Node hai hi). Pure. */
+export function downloadArgs(client, srcPath, videoId, modern) {
+  return ['-f', '18/best[height<=360]/best', '--no-warnings', '-4',
+    ...(modern ? ['--js-runtimes', 'node'] : []),
+    '--extractor-args', `youtube:player_client=${client}`,
+    '-o', srcPath, `https://www.youtube.com/watch?v=${videoId}`];
+}
+
 // yt-dlp search (flat) + chune hue gaane ka audio download.
 // KDMusic-style UX (2026-10-24): master bot ab top 8 lata hai (pages of 3 + "more").
 // Cache key me limit shamil hai taaki 3-wali aur 8-wali khoj ek dusre ko na kaatein.
@@ -21,7 +85,8 @@ export async function searchSongs(query, limit = 8) {
   const { rows } = await pool.query('select results from music_cache where query_hash=$1', [hash]);
   if (rows[0]) return rows[0].results;
   // limit+4 isliye: lambe mix filter me nikal jayenge, peeche purti rahe.
-  const { stdout } = await run(env.ytdlp, ['-J', '--flat-playlist', '--no-warnings', `ytsearch${limit + 4}:${query}`], { timeout: 45_000, maxBuffer: 8 * 1024 * 1024 });
+  initYtdlp();
+  const { stdout } = await run(ytdlpStatus().path, ['-J', '--flat-playlist', '--no-warnings', '-4', `ytsearch${limit + 4}:${query}`], { timeout: 45_000, maxBuffer: 8 * 1024 * 1024 });
   const json = JSON.parse(stdout);
   // channel + viewCount bhi rakho (2026-11-06): merged ranking ko official
   // channel (T-Series aadi) aur views ki taakat naapne ke liye chahiye.
@@ -61,17 +126,22 @@ export async function downloadAudio(videoId) {
 async function _downloadAudio(videoId, m4aPath) {
   // Verified recipe: datacenter IP se seedha audio format 403 deta hai;
   // android player_client se format 18 (mp4, AAC audio) chalta hai -> ffmpeg -c:a copy se .m4a (bina re-encode).
-  // Kuch videos ek client ko rok dete hain — isliye client badal kar 3
-  // koshishen (android -> ios -> tv), wahi format. Teeno fail = download_failed.
+  // 2026-11-07 ke Render logs ki pakki wajah: kuch videos par YouTube
+  // "Failed to extract any player response" deta hai — wahi video bahar ke
+  // IP se turant khul gaya, matlab rukawat server ke mahol se hai. Isliye
+  // har koshish me IPv4 (-4 — YouTube IPv6 blocks ko zyada distrust karta
+  // hai) aur modern binary par --js-runtimes node (downloadArgs dekho).
+  // Client badal kar 3 koshishen (android -> tv -> ios), wahi format.
+  // Teeno fail = download_failed (phir worker ka cross-source rescue hai).
+  initYtdlp();
+  const { path: bin, modern } = ytdlpStatus();
   const srcPath = path.join(env.musicTmp, `${videoId}.src.mp4`);
   let downloaded = false;
   let lastErr = null;
-  for (const client of ['android', 'ios', 'tv']) {
+  for (const client of ['android', 'tv', 'ios']) {
     try {
-      await run(env.ytdlp, ['-f', '18/best[height<=360]/best', '--no-warnings',
-        '--extractor-args', `youtube:player_client=${client}`,
-        '-o', srcPath, `https://www.youtube.com/watch?v=${videoId}`],
-        { timeout: 180_000, maxBuffer: 4 * 1024 * 1024 });
+      await run(bin, downloadArgs(client, srcPath, videoId, modern),
+        { timeout: 75_000, maxBuffer: 4 * 1024 * 1024 });
       downloaded = true;
       break;
     } catch (e) { lastErr = e; try { fs.unlinkSync(srcPath); } catch { /* ignore */ } }
