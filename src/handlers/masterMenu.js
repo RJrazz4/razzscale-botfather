@@ -6,6 +6,7 @@ import { spawnSubBot } from '../services/spawner.js';
 import { searchSongs } from '../services/music.js';
 import { searchSongsSaavn } from '../services/jiosaavn.js';
 import { searchMusicMerged } from '../services/musicSearch.js';
+import { findRepeat, recordPick } from '../services/musicMemory.js';
 import { enqueueJob } from '../services/worker.js';
 import { vipMenuText, vipPitchText, VIP_FEATURES } from './vip.js';
 import { handleConsult, resendConsultScreen, CONSULT_BACK } from './consult.js';
@@ -85,9 +86,11 @@ export const CATEGORIES = {
 };
 const CAT_KEYWORDS = { trending: 'cat_trending', bollywood: 'cat_bollywood', punjabi: 'cat_punjabi', phonk: 'cat_phonk', devotional: 'cat_devotional', bhajan: 'cat_devotional', discover: 'cat_discover' };
 export function zoneRows() {
+  // SEARCH SABSE UPAR (2026-11-07, Hero ka order): user zyadatar apna gaana
+  // khojne aata hai — category baad me. RowIds wahi purane, sirf kram badla.
   return [
-    ...Object.entries(CATEGORIES).map(([id, c]) => ({ rowId: id, title: c.label, description: `${c.label.replace(/^\S+\s/, '')} gaane suno` })),
     { rowId: 'cat_search', title: '🔍 Gaana Search Karo', description: 'Apne gaane ka naam likho' },
+    ...Object.entries(CATEGORIES).map(([id, c]) => ({ rowId: id, title: c.label, description: `${c.label.replace(/^\S+\s/, '')} gaane suno` })),
     { rowId: 'nav_menu', title: '🏠 Main Menu', description: 'Home par wapas' },
   ];
 }
@@ -103,7 +106,7 @@ async function sendMusicZone(inst, from) {
   }).then(() => true).catch(() => false);
   if (!listed) {
     await evo.sendText(inst, from, '🎵 *Music Zone*\n\nCategory tap karo — ya number likho:\n\n' +
-      [...Object.values(CATEGORIES).map((c, i) => `${i + 1}. ${c.label}`), '7. 🔍 Gaana Search Karo'].join('\n'));
+      ['1. 🔍 Gaana Search Karo', ...Object.values(CATEGORIES).map((c, i) => `${i + 2}. ${c.label}`)].join('\n'));
   }
 }
 
@@ -154,9 +157,40 @@ async function sendMusicEmpty(inst, from) {
   }).catch(() => {});
 }
 
+// SMART MUSIC MEMORY (2026-11-07): repeat hit par wahi recording dobara
+// bhejna — bilkul pick wale raste se (busy guard + wahi music_download job),
+// taaki delivery ke saare niyam (vault/saavn chain, fail par saaf text) ek
+// jaise rahein. Delivery fail ho to worker ka failure text user ko naya
+// search karne ka rasta deta hi hai.
+async function deliverRepeat(ctx, hit, query) {
+  const { user, from, inst } = ctx;
+  // results me sirf yahi ek gaana — delivery ke baad "Gaana chuno" khule to
+  // kam se kam yahi track phir dikhe (poori purani list is raste par nahi hai).
+  const single = [{ id: hit.provider_id, title: hit.title, source: hit.provider, url: hit.ref_url || undefined, duration: hit.duration_sec || undefined }];
+  await setFlow(user.id, 'master', { step: 'music_busy', videoId: hit.provider_id, lastTitle: hit.title, results: single, shown: 1, query }, FLOW_TTL);
+  await evo.sendText(inst, from, `🎵 Ye gaana tum pehle bhi sun chuke ho — wahi wala phir bhej raha hoon: *${hit.title}*\nDusri version chahiye to artist ya version (jaise remix) saath likh kar bhejo.`);
+  await evo.sendPresence(inst, from, 'recording', 55000);
+  await enqueueJob('music_download',
+    { instance: inst, to: from, userId: user.id, videoId: hit.provider_id, title: hit.title,
+      source: hit.provider, songId: hit.provider === 'jiosaavn' ? hit.provider_id : undefined,
+      url: hit.provider === 'jiosaavn' ? undefined : (hit.ref_url || `https://www.youtube.com/watch?v=${hit.provider_id}`) },
+    `music:repeat:${user.id}:${hit.provider_id}:${Date.now()}`);
+  recordPick({ userId: user.id, waId: from, pick: { id: hit.provider_id, source: hit.provider, title: hit.title, artist: hit.artist || '', durationSec: hit.duration_sec, url: hit.ref_url }, query }).catch(() => {});
+}
+
 // Category/typed search ka common pipeline: ack -> search -> pick state ya empty state
 async function runMusicSearch(ctx, query, fromKind) {
   const { user, from, inst, flow } = ctx;
+  // SMART MUSIC MEMORY: typed search par pehle is user ki apni history —
+  // pakka repeat mile to search chalaye bina wahi recording. Category
+  // browsing (generic query) par ye check NAHI lagta. Memory fail ho to
+  // aam search hi chalega (catch me khamosh).
+  if (fromKind === 'search') {
+    try {
+      const hit = await findRepeat(user.id, query);
+      if (hit) { await deliverRepeat(ctx, hit, query); return; }
+    } catch { /* memory nahi chali — aam search */ }
+  }
   await evo.sendText(inst, from, `🔍 *${query}* dhoondh raha hoon… bas ek minute, yahi raho 🎧`);
   await evo.sendPresence(inst, from, 'composing', 55000);
   // MERGED SEARCH (2026-11-06 raat): Saavn akela official gaana kai baar de
@@ -307,7 +341,10 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
       const pick = results[n - 1];
       // Busy guard: download chalne tak state 'music_busy' (videoId ke saath) —
       // isi dauraan dobara tap par dusra job NAHI jayega.
-      await setFlow(user.id, 'master', { step: 'music_busy', videoId: pick.id, lastTitle: pick.title }, FLOW_TTL);
+      // results/shown/query bhi saath rakho — delivery ke baad worker inhe
+      // music_done me aage badhayega, taaki "Gaana chuno" option wahi list
+      // dobara khol sake (2026-11-07, Hero ka order).
+      await setFlow(user.id, 'master', { step: 'music_busy', videoId: pick.id, lastTitle: pick.title, results, shown, query: flow.query }, FLOW_TTL);
       await evo.sendText(inst, from, `"${pick.title}" bhej raha hoon, ek minute…`);
       await evo.sendPresence(inst, from, 'recording', 55000);
       await enqueueJob('music_download',
@@ -317,9 +354,19 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
           source: pick.source || 'yt', songId: pick.source === 'jiosaavn' ? pick.id : undefined,
           url: pick.source === 'jiosaavn' ? undefined : pick.url },
         `music:${msgId || `${user.id}:${pick.id}:${Date.now()}`}`);
+      // SMART MUSIC MEMORY: pick history me likho (repeat detection ki neev).
+      recordPick({ userId: user.id, waId: from, pick, query: flow.query }).catch(() => {});
       return;
     }
-    // number/more nahi hai to neeche ke flows (menu aadi) ko mauka do — return mat karo
+    // Number/more nahi hai — par RESULTS khule hue hain aur user ne koi naam
+    // likha hai to woh NAYI khoj hai (2026-11-07, Hero: "har option par bhi
+    // search karne se gaana milega"). Escape shabd (menu/greeting/lyrics)
+    // neeche ke flows ke liye chhode hain — wohi purane raste chalenge.
+    if (t && !['hi', 'hii', 'hello', 'hey', 'menu', 'start', 'namaste', 'lyrics'].includes(lower)) {
+      await runMusicSearch(ctx, t, 'search');
+      return;
+    }
+    // kuch bhi nahi bacha to neeche ke flows (menu aadi) ko mauka do — return mat karo
   }
 
   // ===== TAP mapping — purani chats ke rowIds -> naye actions (dead end kahin nahi) =====
@@ -328,6 +375,25 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
   if (['menu', 'music_done', 'music_zone'].includes(state)) {
     const TAP_MAP = { m1: 'mk', m2: 'mz', m3: 'ai', m4: 'image', m5: 'vip', music_new: 'mz' };
     if (TAP_MAP[t]) { t = TAP_MAP[t]; ctx.t = t; }
+  }
+
+  // ===== GAANA CHUNO — wahi results list dobara (2026-11-07, Hero ka order) =====
+  // Gaana bajne ke baad wala 4th option: ek baar search hua tha, usi list se
+  // dusra gaana chunna hai (jaise chuna hua gaana duplicate/waisa-na-mila ho).
+  // List flow ke results me rehti hai (pick -> busy -> done, worker aage
+  // badhata hai). Na mile (purani chat) to seedha search prompt — dead end nahi.
+  if (t === 'music_list' && ['music_done', 'music_pick', 'music_zone', 'menu'].includes(state)) {
+    const last = flow?.results || [];
+    if (last.length) {
+      const shown = Math.min(flow.shown || MUSIC_PAGE, last.length);
+      await setFlow(user.id, 'master', { step: 'music_pick', results: last, shown, query: flow.query || '', from: 'search', lastTitle: flow?.lastTitle }, FLOW_TTL);
+      const listed = await sendMusicList(inst, from, last, shown);
+      if (!listed) await evo.sendText(inst, from, musicPageText(last, 0, shown));
+    } else {
+      await setFlow(user.id, 'master', { step: 'music_query', lastTitle: flow?.lastTitle }, FLOW_TTL);
+      await evo.sendText(inst, from, 'Purani list ab nahi mili — gaane ka naam likho, phir se dhoondh deta hoon 🎵');
+    }
+    return;
   }
 
   // ===== VIP Consultation (naya state machine — masterMenu sirf route karta hai) =====
@@ -341,14 +407,14 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
     if (t === 'mz') { await sendMusicZone(inst, from); return; }
     const catId = CATEGORIES[t] ? t : (CAT_KEYWORDS[lower] || null);
     if (catId) { await runMusicSearch(ctx, CATEGORIES[catId].query, 'category'); return; }
-    if (t === 'cat_search' || ['7', 'search', 'khojo'].includes(lower)) {
+    if (t === 'cat_search' || ['1', 'search', 'khojo'].includes(lower)) {
       await setFlow(user.id, 'master', { step: 'music_query', lastTitle: flow?.lastTitle }, FLOW_TTL);
       await evo.sendText(inst, from, 'Gaane ka naam bhejo — main top results dunga.');
       return;
     }
     const zn = Number(t);
-    if (Number.isInteger(zn) && zn >= 1 && zn <= 6) {
-      const catId = Object.keys(CATEGORIES)[zn - 1];
+    if (Number.isInteger(zn) && zn >= 2 && zn <= 7) {
+      const catId = Object.keys(CATEGORIES)[zn - 2];
       await runMusicSearch(ctx, CATEGORIES[catId].query, 'category');
       return;
     }
