@@ -270,6 +270,76 @@ async function deliverSaavnTrackCloud(p) {
   throw new Error('saavn_cloud_delivery_failed');
 }
 
+// ---------- CLOUD par YT gaane ki delivery (2026-11-07, Hero ki shikayat) ----------
+// Pehle YT pick Cloud par seedha fail hota tha ('cloud_yt_link_only') — jabki
+// kitne hi gaane (Zaroorat jaise) Saavn par hain hi nahi, sirf YT par hain.
+// User ko fail dikhana galat tha jab asal rasta maujood hai: file download
+// karke (backup vault me bhi rehti hai) Meta par media upload, phir media_id
+// se audio. Upload wali media_id wa_media_cache me 25 din rakhi jati hai —
+// gaana ek baar baja to agli baar na download, na upload: seedha send.
+const WA_MEDIA_TTL_MS = 25 * 24 * 3600_000; // Meta media_id ~30 din chalti hai
+let waCacheReady = null;
+function ensureWaMediaCache() {
+  if (!waCacheReady) {
+    waCacheReady = pool.query(`create table if not exists wa_media_cache (
+      video_id text primary key, media_id text not null, created_at text not null
+    )`).catch((e) => { waCacheReady = null; throw e; });
+  }
+  return waCacheReady;
+}
+export async function getWaMediaId(videoId) {
+  if (!videoId) return null;
+  await ensureWaMediaCache();
+  const { rows } = await pool.query('select media_id, created_at from wa_media_cache where video_id=$1', [videoId]);
+  const row = rows[0];
+  if (!row) return null;
+  if (Date.now() - Date.parse(row.created_at) > WA_MEDIA_TTL_MS) return null; // purani id par bharosa nahi
+  return row.media_id;
+}
+export async function setWaMediaId(videoId, mediaId) {
+  if (!videoId || !mediaId) return;
+  await ensureWaMediaCache();
+  await pool.query(
+    `insert into wa_media_cache (video_id, media_id, created_at) values ($1,$2,$3)
+     on conflict (video_id) do update set media_id = excluded.media_id, created_at = excluded.created_at`,
+    [videoId, mediaId, new Date().toISOString()]);
+}
+export async function clearWaMediaId(videoId) {
+  if (!videoId) return;
+  await ensureWaMediaCache();
+  await pool.query('delete from wa_media_cache where video_id=$1', [videoId]);
+}
+
+function audioMimeFor(file) {
+  const ext = path.extname(file).toLowerCase();
+  if (ext === '.mp3') return 'audio/mpeg';
+  if (ext === '.ogg') return 'audio/ogg';
+  if (ext === '.aac') return 'audio/aac';
+  return 'audio/mp4'; // .m4a ka WhatsApp-naam
+}
+
+async function deliverYtTrackCloud(p) {
+  // Pehla rasta: cache wali media_id — sabse tez, koi download/upload nahi.
+  const cached = await getWaMediaId(p.videoId).catch(() => null);
+  if (cached) {
+    const sent = await graph.sendAudioById(p.to, cached).catch(() => false);
+    if (sent) return;
+    await clearWaMediaId(p.videoId).catch(() => {}); // id mar gayi — fresh upload par giro
+  }
+  // File lao: getAudioForVideo media_vault (Telegram backup) pehle dekhta
+  // hai, warna yt-dlp se download karke vault me bhi rakh deta hai — ek baar
+  // aaya gaana hamesha ke liye backup (Hero ki maang, 2026-11-07).
+  const file = await getAudioForVideo(p.videoId, p.title);
+  let size = 0;
+  try { size = fs.statSync(file).size; } catch { throw new Error('yt_cloud_file_missing'); }
+  if (!size || size > WHATSAPP_MAX) throw new Error('yt_cloud_too_large');
+  const mediaId = await graph.uploadMediaFile(file, audioMimeFor(file), path.basename(file));
+  if (!mediaId) throw new Error('yt_cloud_upload_failed');
+  const sent = await graph.sendAudioById(p.to, mediaId);
+  if (!sent) throw new Error('yt_cloud_send_failed');
+  await setWaMediaId(p.videoId, mediaId).catch(() => {});
+}
+
 // Post-audio BUTTONS (Cloud) — Evolution par yahi kaam action LIST karti hai; Cloud par
 // 3 reply buttons: Lyrics / Naya gaana / Menu. Button ids masterMenu ke purane rowIds
 // hi hain — wahi branches (lyrics keyword / TAP_MAP music_new / menu keyword) chalenge.
@@ -306,10 +376,9 @@ const EXECUTORS = {
     await evo.sendPresence(p.instance, p.to, 'composing', 20000).catch(() => {});
     try {
       if (p.instance === evo.CLOUD_INSTANCE) {
-        // CLOUD branch: file/vault wala rasta nahi — saavn gaana LINK se, uske baad
-        // action LIST. YT-source pick ka audio Cloud par nahi banta, isliye
-        // woh fail hokar sendMusicFailure par jata hai (link wahan bhi NAHI
-        // jata — 2026-11-07 ka pakka niyam).
+        // CLOUD branch: saavn gaana LINK se jata hai; YT gaana download karke
+        // media upload se (deliverYtTrackCloud — usi ke liye bana hai, kyunki
+        // kitne gaane Saavn par hain hi nahi). Dono ke baad action LIST jati hai.
         if (p.source === 'jiosaavn' && p.songId) {
           try {
             await deliverSaavnTrackCloud(p);
@@ -318,7 +387,7 @@ const EXECUTORS = {
             throw e;
           }
         } else {
-          throw new Error('cloud_yt_link_only');
+          await deliverYtTrackCloud(p);
         }
         await moveBusyState(p.userId, p.videoId, { step: 'music_done', lastTitle: p.title });
         // 4 options chahiye (Lyrics/Gaana chuno/Naya gaana/Menu) — WhatsApp
