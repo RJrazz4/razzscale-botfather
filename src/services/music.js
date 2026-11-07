@@ -164,6 +164,97 @@ async function _downloadAudio(videoId, m4aPath) {
   return m4aPath;
 }
 
+// ---------- SOUNDCLOUD — TEESRA SOURCE (2026-11-07, Hero ka order) ----------
+// Phonk/remix/Punjabi ka woh hissa jo YouTube par kamzor padta hai.
+// Search bhi yt-dlp se (scsearch), download bhi — koi API key nahi.
+// Fail ho to search [] degi aur delivery throw karegi; merged search aur
+// worker ka rescue use sambhal lete hain — SC band ho to baaki do source
+// bina ruke chalte rehte hain.
+export function mapScEntry(e) {
+  if (!e?.id || !e?.url) return null;
+  const dur = Number(e.duration) || null;
+  return {
+    source: 'soundcloud', id: String(e.id), title: e.title || 'Gaana',
+    duration: dur, durationSec: dur, url: e.url,
+    channel: e.uploader || '', viewCount: Number(e.view_count || e.playback_count) || 0,
+  };
+}
+
+export async function searchSongsSc(query, limit = 8) {
+  const hash = crypto.createHash('sha256').update(`sc1:${limit}:${query.toLowerCase().trim()}`).digest('hex');
+  const { rows } = await pool.query('select results from music_cache where query_hash=$1', [hash]);
+  if (rows[0]) return rows[0].results;
+  initYtdlp();
+  const { stdout } = await run(ytdlpStatus().path, ['-J', '--flat-playlist', '--no-warnings', '-4', `scsearch${limit + 4}:${query}`], { timeout: 45_000, maxBuffer: 8 * 1024 * 1024 });
+  const json = JSON.parse(stdout);
+  const results = (json?.entries || []).map(mapScEntry).filter(Boolean)
+    .filter((t) => !(t.duration > MAX_SONG_SEC)).slice(0, limit);
+  await pool.query('insert into music_cache (query_hash, query_text, results) values ($1,$2,$3) on conflict do nothing',
+    [hash, query, JSON.stringify(results)]);
+  return results;
+}
+
+/** SoundCloud download ke arguments — audio ko saaf .m4a me nikalo
+ *  (pipeline ki baaki files bhi .m4a hi hain). Pure. */
+export function scDownloadArgs(url, outTemplate, modern) {
+  return ['--no-warnings', '-4',
+    ...(modern ? ['--js-runtimes', 'node'] : []),
+    '--ffmpeg-location', FFMPEG,
+    '--extract-audio', '--audio-format', 'm4a', '--audio-quality', '0',
+    '-o', outTemplate, url];
+}
+
+async function downloadScAudio(scId, url) {
+  fs.mkdirSync(env.musicTmp, { recursive: true });
+  const m4a = path.join(env.musicTmp, `sc_${scId}.m4a`);
+  if (fs.existsSync(m4a)) return m4a;
+  if (!url) throw new Error('sc_no_url');
+  await dlGate();
+  try {
+    initYtdlp();
+    const { path: bin, modern } = ytdlpStatus();
+    await run(bin, scDownloadArgs(url, path.join(env.musicTmp, `sc_${scId}.%(ext)s`), modern),
+      { timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
+  } catch (e) {
+    console.error('[music] sc download failed:', String(e?.stderr || e?.message || '').slice(0, 400));
+    throw new Error('download_failed');
+  } finally { dlDone(); }
+  if (!fs.existsSync(m4a)) throw new Error('download_failed');
+  return m4a;
+}
+
+// Vault-aware getter — YouTube wali hi kataar (vault -> disk -> download),
+// par chaabi 'sc:<id>' / file 'sc_<id>.m4a' ke alag namespace me.
+export async function getAudioForScTrack(scId, url, title = '') {
+  fs.mkdirSync(env.musicTmp, { recursive: true });
+  const key = `sc:${scId}`;
+  if (telegram.vaultEnabled()) {
+    const { rows } = await pool.query('select * from media_vault where video_id=$1', [key]).catch(() => ({ rows: [] }));
+    if (rows[0]?.file_id) {
+      const dest = path.join(env.musicTmp, `sc_${scId}.m4a`);
+      const ok = await telegram.downloadByFileId(rows[0].file_id, dest);
+      if (ok && fs.existsSync(dest) && fs.statSync(dest).size <= 16 * 1024 * 1024) return dest;
+      await pool.query('delete from media_vault where video_id=$1', [key]).catch(() => {});
+    }
+  }
+  const disk = path.join(env.musicTmp, `sc_${scId}.m4a`);
+  if (fs.existsSync(disk)) return disk;
+  const file = await downloadScAudio(scId, url);
+  if (telegram.vaultEnabled()) {
+    telegram.uploadFile(env.telegramVaultChatId, file, key)
+      .then(async (up) => {
+        if (up?.file_id) {
+          await pool.query(
+            `insert into media_vault (video_id, title, file_id, message_id, size) values ($1,$2,$3,$4,$5)
+             on conflict (video_id) do update set file_id=excluded.file_id, message_id=excluded.message_id, size=excluded.size`,
+            [key, title || null, up.file_id, up.message_id, fs.statSync(file).size]).catch(() => {});
+        }
+      })
+      .catch(() => {});
+  }
+  return file;
+}
+
 // ---------- DEAD VIDEO NISHAAN (2026-11-07, Hero: "jo bajta nahi woh list me kyun hai") ----------
 // Jo YT video 2+ baar download fail ho jaye, us par nishan lag jata hai aur
 // searchMusicMerged use list se hata deta hai. Nishan kabhi purana nahi
