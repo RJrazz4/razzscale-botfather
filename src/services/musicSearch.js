@@ -53,6 +53,12 @@ export function scoreYtTrack(track, query, position = 0, total = 8) {
   const queryF = foldText(query);
   for (const w of PENALTY_WORDS) if (allText.includes(w) && !queryF.includes(w)) score -= 2.2;
   if (!queryF.includes('remix') && allText.includes('remix')) score -= 2.2;
+  // CLICKBAIT DEMOTE (2026-11-07 raat, Hero ki report): title me keyword
+  // bharmaar (bahut '|' hisse) ya bina mange "New Hindi Song 20XX" ka dawa —
+  // local uploader ke nakli upload ki pehchan; official title saaf hota hai.
+  const pipeCount = (track.title || '').split('|').length - 1;
+  if (pipeCount >= 3) score -= 1.0;
+  if (/new (hindi |bollywood )?song 20\d\d/.test(titleF) && !/20\d\d/.test(queryF)) score -= 1.0;
   const dur = Number(track.duration) || 0;
   if (dur && dur < 100) score -= 1.2;
   if (dur > 560) score -= 0.8;
@@ -91,7 +97,23 @@ export async function searchMusicMerged(query, limit = 8) {
   // hi na do — Phonk jaisi category me 1-ghante wale playlist sabse upar
   // baithe the, woh na download hote hain na WhatsApp par jate hain.
   for (const t of saavn) if (isSongLength(t)) pool.push({ track: t, score: Number(t._score) || 0 });
-  ytRaw.forEach((t, i) => { if (isSongLength(t)) pool.push({ track: t, score: scoreYtTrack(t, query, i, ytRaw.length) }); });
+  ytRaw.forEach((t, i) => {
+    if (!isSongLength(t)) return;
+    let s = scoreYtTrack(t, query, i, ytRaw.length);
+    // DURATION CROSS-CHECK (2026-11-07 raat): Saavn par wahi gaana maujood
+    // hai aur is YT upload ki lambai usse 30s+ alag hai to ye woh gaana ho
+    // hi nahi sakta (clickbait/short nakli version) — zor se neeche dabao.
+    const tf = foldText(t.title || '');
+    for (const st of saavn) {
+      const core = songCoreOf(st);
+      if (core && core.length >= 4 && st.duration && tf.includes(core)) {
+        const d = Number(t.duration) || 0;
+        if (d && Math.abs(d - Number(st.duration)) > 30) s -= 3;
+        break;
+      }
+    }
+    pool.push({ track: t, score: s });
+  });
   for (const t of scRaw) if (isSongLength(t)) pool.push({ track: t, score: scoreScTrack(t, query) });
   pool.sort((a, b) => b.score - a.score);
 
@@ -203,14 +225,16 @@ export function pickAltUpload(results, failedId) {
 
 /** Kai dusre uploads ek saath (rescue v3): bahar rakhe ids chhod kar,
  *  kram barkarar, zyada se zyada n. Pure. */
-export function pickAltUploads(results, excludeIds, n = 3) {
+export function pickAltUploads(results, excludeIds, n = 3, query = '') {
   const ex = new Set(Array.isArray(excludeIds) ? excludeIds : [excludeIds]);
-  const out = [];
+  const cands = [];
   for (const r of results || []) {
-    if (out.length >= n) break;
     if (!r?.id || ex.has(r.id)) continue;
     if (!isSongLength(r)) continue;
-    out.push(r);
+    cands.push(r);
   }
-  return out;
+  // Query mile to wahi tarazu (official/views/clickbait demote) — pehle rescue
+  // bina parkhe agla upload utha leta tha, clickbait yahin se ghusta tha.
+  if (query) cands.sort((a, b) => scoreYtTrack(b, query, 0) - scoreYtTrack(a, query, 0));
+  return cands.slice(0, n);
 }
