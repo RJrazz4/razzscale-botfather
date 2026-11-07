@@ -107,6 +107,23 @@ create table if not exists saavn_cache (
   updated_at text not null default (datetime('now'))
 );
 
+-- SMART MUSIC MEMORY (2026-11-07): per-user listening history + repeat detection.
+-- Ek user ki history dusre ko kabhi nahi — saari queries user_id par bandhi hain.
+-- status: 'selected' (pick kiya) -> 'sent' (worker ne bhej diya). 'Listened'
+-- jaisi state jaan-boojh kar NAHI hai — bhejna sunna nahi hota.
+create table if not exists listening_history (
+  id text primary key,
+  user_id text not null, wa_id text,
+  provider text not null, provider_id text not null,
+  title text, normalized_title text, artist text, norm_artist text,
+  duration_sec integer, ref_url text,
+  first_requested_at text not null, last_requested_at text not null,
+  request_count integer not null default 1,
+  status text not null default 'selected', last_query text
+);
+create unique index if not exists uniq_listening_user_track on listening_history (user_id, provider, provider_id);
+create index if not exists idx_listening_user_title on listening_history (user_id, normalized_title);
+
 -- WhatsApp Cloud API (Official, Hybrid Phase-1): Meta webhook se aaye inbound
 -- messages ka raw record (audit/debug ke liye; processing alag se jud sakti hai).
 create table if not exists whatsapp_events (
