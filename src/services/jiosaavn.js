@@ -14,6 +14,12 @@ const DES_KEY = Buffer.from('38346591'.repeat(3), 'utf8'); // 24 bytes for EDE3
 
 export const META_TTL_MS = 24 * 3600_000; // metadata cache: 24 ghante
 export const URL_TTL_MS = 45 * 60_000;    // download URL sirf 45 min fresh maano —
+// DELIVERY CAP (2026-11-07, Hero ki shikayat par): WhatsApp audio ki had
+// 16MB hai — 10 minute (600s) se lamba "gaana" asal me mix/playlist hota
+// hai, woh download bhi nahi hota aur bheja bhi nahi ja sakta. Bot woh
+// sujhaye hi na jo de na sake: teeno source (Saavn/YT/merged) yahi cap
+// maante hain. Cap yahan isliye hai kyunki baaki dono module yahi se lete hain.
+export const MAX_SONG_SEC = 600;
 // WAJAH: JioSaavn ke media URLs time-limited hote hain. Metadata (naam/artist/ID)
 // 24h chalega, lekin purana download URL CDN par dead mil sakta hai; isiliye bhejne
 // se pehle ID se fresh URL lena hi safe hai. (URL refresh = 1 halki API call.)
@@ -267,6 +273,8 @@ export async function searchSongsSaavn(query, limit = 8) {
     if (tracks.length >= limit) break;
     const track = mapSong(s);
     if (!track) continue;
+    // 10-min cap (MAX_SONG_SEC): lamba mix list me aaye hi na.
+    if (track.durationSec && track.durationSec > MAX_SONG_SEC) continue;
     const url = preferredUrl(decryptMediaUrl(s.encrypted_media_url), s);
     // URL na bane (kuch gaane DRM/Pro-only hote hain) to track list me rakho hi mat —
     // user ko woh gaana dikhana hi bekaar hai jo baj hi nahi sakta.
