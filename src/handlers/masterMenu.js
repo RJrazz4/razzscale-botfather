@@ -377,7 +377,8 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
       await enqueueJob('music_download',
         { instance: inst, to: from, userId: user.id, videoId: pick.id, title: pick.title,
           // Source routing (FAST MUSIC v2): jiosaavn picks par worker saavn chain
-          // chalata hai; url sirf YT picks par (failure-text ka YouTube link wahi se banta hai).
+          // chalata hai; url sirf YT picks par (andar ki delivery chain ke liye —
+          // failure par user ko YouTube link KABHI nahi jata, 2026-11-07 niyam).
           source: pick.source || 'yt', songId: pick.source === 'jiosaavn' ? pick.id : undefined,
           url: pick.source === 'jiosaavn' ? undefined : pick.url },
         `music:${msgId || `${user.id}:${pick.id}:${Date.now()}`}`);
