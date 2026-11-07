@@ -1,5 +1,5 @@
 import { searchSongsSaavn, foldText, queryOverlap, MAX_SONG_SEC } from './jiosaavn.js';
-import { searchSongs } from './music.js';
+import { searchSongs, deadVideoIds } from './music.js';
 
 /** Gaana delivery ke layak hai? Duration pata ho aur 10-min cap se lamba ho
  *  to NAHI (1-ghante wale mix/playlist — WhatsApp par bheje hi nahi ja sakte).
@@ -99,6 +99,31 @@ export async function searchMusicMerged(query, limit = 8) {
     out.push(track);
   }
   // Kuch na mile to jo mila wahi (khaali se behtar) — par lambe mix yahan bhi nahi
-  if (!out.length) return [...saavn, ...ytRaw].filter(isSongLength).slice(0, limit);
+  let final = out.length ? out : [...saavn, ...ytRaw].filter(isSongLength).slice(0, limit);
+  // DEAD FILTER (2026-11-07): jo YT video baar-baar download fail ho chuka
+  // hai, use list me dikhao hi mat — "list me hai par bajta nahi" wali
+  // shikayat ki jad yahi thi. Nishan music.js ke music_dead me rehta hai;
+  // jaanch fail ho to bina filter ke aage badho (search kabhi na ruke).
+  try {
+    const ytIds = final.filter((t) => t.source !== 'jiosaavn').map((t) => t.id).filter(Boolean);
+    if (ytIds.length) {
+      const dead = await deadVideoIds(ytIds);
+      if (dead.size) final = final.filter((t) => t.source === 'jiosaavn' || !dead.has(t.id));
+    }
+  } catch { /* upar likha hai — search nahi rukegi */ }
+  return final;
+}
+
+/** List ke YT gaane jinhe list bante hi peeche se download (prefetch) karna
+ *  hai — dikhaye gaye page se, kram barkarar, zyada se zyada `limit`.
+ *  Saavn picks link se jate hain, unhe prefetch ki zaroorat nahi. Pure. */
+export function prefetchTargets(results, limit = 3) {
+  const out = [];
+  for (const r of results || []) {
+    if (out.length >= limit) break;
+    if (!r || r.source === 'jiosaavn' || !r.id) continue;
+    if (r.duration && r.duration > MAX_SONG_SEC) continue;
+    out.push({ videoId: r.id, title: r.title || '' });
+  }
   return out;
 }
