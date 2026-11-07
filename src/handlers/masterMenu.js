@@ -419,7 +419,7 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
   // ===== TAP mapping — purani chats ke rowIds -> naye actions (dead end kahin nahi) =====
   // Gate: sirf menu-ish states me, taaki state-flows (spawn/ai/consult/music numbers) na takrayen.
   // Ye consult entry se PEHLE hai taaki m5 -> 'vip' bhi consultation khole.
-  if (['menu', 'music_done', 'music_zone'].includes(state)) {
+  if (['menu', 'music_done', 'music_zone', 'ai_chat'].includes(state)) {
     const TAP_MAP = { m1: 'mk', m2: 'mz', m3: 'ai', m4: 'image', m5: 'vip', music_new: 'mz' };
     if (TAP_MAP[t]) { t = TAP_MAP[t]; ctx.t = t; }
   }
@@ -429,7 +429,7 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
   // dusra gaana chunna hai (jaise chuna hua gaana duplicate/waisa-na-mila ho).
   // List flow ke results me rehti hai (pick -> busy -> done, worker aage
   // badhata hai). Na mile (purani chat) to seedha search prompt — dead end nahi.
-  if (t === 'music_list' && ['music_done', 'music_pick', 'music_zone', 'menu'].includes(state)) {
+  if (t === 'music_list' && ['music_done', 'music_pick', 'music_zone', 'menu', 'ai_chat'].includes(state)) {
     const last = flow?.results || [];
     if (last.length) {
       const shown = Math.min(flow.shown || MUSIC_PAGE, last.length);
@@ -607,6 +607,19 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
     if (musicWord && (listenVerb || t.split(/\s+/).length <= 3)) {
       await setFlow(user.id, 'music', { step: 'music_home' });
       await sendMusicZone(ctx);
+      return;
+    }
+    // NANGA GAANA-NAAM (2026-11-07 raat, Hero ki live report): user menu par
+    // seedha gaane ka naam likh de ("Mujhe Teri jarurat hai") to woh AI chat
+    // nahi, gaana hi hai — bot ka sabse bada kaam yahi hai, aur dimag (LLM)
+    // atka ho to bhi gaana milna chahiye. Sawal/service wale shabd hon to
+    // ye andaz NAHI lagega — woh neeche agent wale raste par jayenge.
+    const lw = lower.split(/\s+/).filter(Boolean);
+    const hintHit = lower.includes('?')
+      || ['bot banana', 'band hai', 'nahi ho'].some((p) => lower.includes(p))
+      || ['kya', 'kaise', 'kitna', 'kitne', 'kyon', 'kyu', 'kab', 'price', 'daam', 'website', 'automation', 'madad', 'help', 'problem', 'dikkat', 'error'].some((w) => lw.includes(w));
+    if (!hintHit && lw.length >= 1 && lw.length <= 8) {
+      await runMusicSearch(ctx, t, 'search');
       return;
     }
   }
