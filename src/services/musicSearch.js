@@ -156,8 +156,18 @@ const RESCUE_NOISE = new Set(['official', 'video', 'song', 'full', 'hd', '4k', '
 /** YT ke lambe title se saaf khoj-shabd: pehla hissa (| se pehle), brackets
  *  bahar, "Artist - Song" ho to gaane wala hissa, noise shabd bahar. Pure. */
 export function rescueQueryFromTitle(title) {
-  let s = String(title || '').split('|')[0]
-    .replace(/\[[^\]]*\]/g, ' ').replace(/\([^)]*\)/g, ' ');
+  const raw = String(title || '');
+  const segs = raw.split('|').map((x) => x.trim()).filter(Boolean);
+  // Kaun sa hissa khoj banega: aam taur par PEHLA hissa (gaane ka naam wahi
+  // hota hai). Par pehla hissa sirf Devanagari hook ho ("ओ सांवरे || O
+  // Saanware Mujhe Teri Jarurat Hai || Kanhaiya Mittal") to Latin aksharon
+  // wala SABSE LAMBA hissa — asal naam wahi hai, usi par Saavn milega.
+  let s = segs[0] || raw;
+  if (!/[A-Za-z]{3,}/.test(s)) {
+    const latin = segs.filter((x) => /[A-Za-z]{3,}/.test(x));
+    if (latin.length) s = latin.sort((a, b) => b.length - a.length)[0];
+  }
+  s = s.replace(/\[[^\]]*\]/g, ' ').replace(/\([^)]*\)/g, ' ');
   const parts = s.split(/\s*[—–-]\s*/).filter(Boolean);
   if (parts.length >= 2) s = parts.slice(1).join(' ');
   const words = foldText(s).split(' ').filter((w) => w && !RESCUE_NOISE.has(w));
