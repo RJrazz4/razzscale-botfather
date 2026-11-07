@@ -115,15 +115,15 @@ function diskCached(videoId) {
   } catch { return null; }
 }
 
-export async function downloadAudio(videoId) {
+export async function downloadAudio(videoId, opts = {}) {
   fs.mkdirSync(env.musicTmp, { recursive: true });
   const m4a = path.join(env.musicTmp, `${videoId}.m4a`);
   if (fs.existsSync(m4a)) return m4a;
   await dlGate();
-  try { return await _downloadAudio(videoId, m4a); } finally { dlDone(); }
+  try { return await _downloadAudio(videoId, m4a, opts); } finally { dlDone(); }
 }
 
-async function _downloadAudio(videoId, m4aPath) {
+async function _downloadAudio(videoId, m4aPath, opts = {}) {
   // Verified recipe: datacenter IP se seedha audio format 403 deta hai;
   // android player_client se format 18 (mp4, AAC audio) chalta hai -> ffmpeg -c:a copy se .m4a (bina re-encode).
   // 2026-11-07 ke Render logs ki pakki wajah: kuch videos par YouTube
@@ -140,7 +140,7 @@ async function _downloadAudio(videoId, m4aPath) {
   const racers = ['android', 'tv', 'web'].map((client) => {
     const src = path.join(env.musicTmp, `${videoId}.src.${client}.mp4`);
     const pr = run(bin, downloadArgs(client, src, videoId, modern),
-      { timeout: 45_000, maxBuffer: 4 * 1024 * 1024 });
+      { timeout: opts.fast ? 35_000 : 45_000, maxBuffer: 4 * 1024 * 1024 });
     return { src, pr };
   });
   let winnerSrc = null;
@@ -158,7 +158,7 @@ async function _downloadAudio(videoId, m4aPath) {
       fs.promises.unlink(r.src).catch(() => {});
     }
   }
-  if (!winnerSrc) {
+  if (!winnerSrc && !opts.fast) {
     const iosSrc = path.join(env.musicTmp, `${videoId}.src.ios.mp4`);
     try {
       await run(bin, downloadArgs('ios', iosSrc, videoId, modern),
@@ -224,7 +224,7 @@ export function scDownloadArgs(url, outTemplate, modern) {
     '-o', outTemplate, url];
 }
 
-async function downloadScAudio(scId, url) {
+async function downloadScAudio(scId, url, timeoutMs = 120_000) {
   fs.mkdirSync(env.musicTmp, { recursive: true });
   const m4a = path.join(env.musicTmp, `sc_${scId}.m4a`);
   if (fs.existsSync(m4a)) return m4a;
@@ -234,7 +234,7 @@ async function downloadScAudio(scId, url) {
     initYtdlp();
     const { path: bin, modern } = ytdlpStatus();
     await run(bin, scDownloadArgs(url, path.join(env.musicTmp, `sc_${scId}.%(ext)s`), modern),
-      { timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
+      { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 });
   } catch (e) {
     console.error('[music] sc download failed:', String(e?.stderr || e?.message || '').slice(0, 400));
     throw new Error('download_failed');
@@ -245,7 +245,7 @@ async function downloadScAudio(scId, url) {
 
 // Vault-aware getter — YouTube wali hi kataar (vault -> disk -> download),
 // par chaabi 'sc:<id>' / file 'sc_<id>.m4a' ke alag namespace me.
-export async function getAudioForScTrack(scId, url, title = '') {
+export async function getAudioForScTrack(scId, url, title = '', timeoutMs = 120_000) {
   fs.mkdirSync(env.musicTmp, { recursive: true });
   const key = `sc:${scId}`;
   if (telegram.vaultEnabled()) {
@@ -259,7 +259,7 @@ export async function getAudioForScTrack(scId, url, title = '') {
   }
   const disk = path.join(env.musicTmp, `sc_${scId}.m4a`);
   if (fs.existsSync(disk)) return disk;
-  const file = await downloadScAudio(scId, url);
+  const file = await downloadScAudio(scId, url, timeoutMs);
   if (telegram.vaultEnabled()) {
     telegram.uploadFile(env.telegramVaultChatId, file, key)
       .then(async (up) => {
@@ -310,7 +310,7 @@ export async function deadVideoIds(ids) {
 
 // Vault-aware getter (V2.1, plan §2.2): order = Telegram media_vault -> local disk -> yt-dlp cold.
 // Cold ke baad gaana BACKGROUND me vault me chala jata hai — user ka reply us par nahi rukta.
-export async function getAudioForVideo(videoId, title = '') {
+export async function getAudioForVideo(videoId, title = '', opts = {}) {
   fs.mkdirSync(env.musicTmp, { recursive: true });
   // 1) Telegram vault
   if (telegram.vaultEnabled()) {
@@ -327,7 +327,7 @@ export async function getAudioForVideo(videoId, title = '') {
   const disk = diskCached(videoId);
   if (disk) return disk;
   // 3) Cold download (yt-dlp) + background vault upload
-  const file = await downloadAudio(videoId);
+  const file = await downloadAudio(videoId, opts);
   if (telegram.vaultEnabled()) {
     telegram.uploadFile(env.telegramVaultChatId, file, videoId)
       .then(async (up) => {
