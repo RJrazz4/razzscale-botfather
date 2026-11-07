@@ -5,7 +5,7 @@ import { env } from '../config/env.js';
 import * as evo from './transport.js';
 import * as graph from './graph-cloud.js';
 import * as telegram from './telegram.js';
-import { getAudioForVideo, searchSongs, noteDownloadFailure, initYtdlp, getAudioForScTrack } from './music.js';
+import { getAudioForVideo, searchSongs, noteDownloadFailure, initYtdlp, getAudioForScTrack, searchSongsSc } from './music.js';
 import { getFreshUrl, withQuality, searchSongsSaavn } from './jiosaavn.js';
 import { isSongLength, pickSaavnRescue, pickAltUpload, rescueQueryFromTitle } from './musicSearch.js';
 import { markSent } from './musicMemory.js';
@@ -58,7 +58,10 @@ async function finish(job, ok, result) {
   if (ok) {
     await pool.query("update jobs set status='done', result=$2, updated_at=$3 where id=$1",
       [job.id, result || null, new Date().toISOString()]).catch(() => {});
-  } else if (job.attempts >= MAX_ATTEMPTS) {
+  } else if (job.attempts >= MAX_ATTEMPTS || job.type === 'music_download') {
+    // music_download par job-retry NAHI: uske andar ka rescue hi dusri
+    // koshish hai. Retry wahi fail hua download dohrata tha — 2026-11-07
+    // 16:22 wale case me user ko 2× (kul ~5 min) intezaar karna pada.
     await pool.query("update jobs set status='failed', result=$2, updated_at=$3 where id=$1",
       [job.id, result || null, new Date().toISOString()]).catch(() => {});
   } else {
@@ -385,7 +388,18 @@ async function deliverYtAny(p, videoId, url) {
   await evo.sendMedia(p.instance, p.to, b64, p.title, 'audio', { footer: true });
 }
 
+async function deliverScAny(p, scTrack) {
+  const p2 = { ...p, source: 'soundcloud', scId: scTrack.id, videoId: undefined, url: scTrack.url };
+  if (p.instance === evo.CLOUD_INSTANCE) { await deliverScTrackCloud(p2); return; }
+  const file = await getAudioForScTrack(scTrack.id, scTrack.url, scTrack.title);
+  await evo.sendPresence(p.instance, p.to, 'recording', 30000).catch(() => {});
+  const b64 = fs.readFileSync(file).toString('base64');
+  await evo.sendMedia(p.instance, p.to, b64, p.title, 'audio', { footer: true });
+}
+
 async function rescueDeliver(p) {
+  const t0 = p._t0 || Date.now();
+  const elapsed = () => Date.now() - t0;
   if (p.source === 'jiosaavn') {
     const hits = await searchSongs(rescueQueryFromTitle(p.title) || p.title, 6).catch(() => []);
     const hit = (hits || []).find((h) => h?.id && isSongLength(h));
@@ -396,9 +410,11 @@ async function rescueDeliver(p) {
     // taaki moveBusyState bina id-mel ke busy guard saaf kar de — rescue wala
     // id flow ke busy id se mel hi nahi khayega aur user 30 min atka rahega.
     p.rescuedSource = 'yt'; p.rescuedId = hit.id; p.videoId = undefined;
+    console.log('[music] rescue: Saavn fail -> YT se aaya:', hit.id);
     return;
   }
-  // YT pick fail — pehle Saavn par wahi gaana (sakht mel par hi)
+  // (1) Saavn par wahi gaana (sakht mel par hi) — CDN link, extraction ki
+  // deewaar wahan hai hi nahi, isliye ye sabse bharosemand rescue hai.
   const hits = await searchSongsSaavn(rescueQueryFromTitle(p.title) || p.title, 6).catch(() => []);
   const hit = pickSaavnRescue(p.title, hits);
   if (hit) {
@@ -406,15 +422,37 @@ async function rescueDeliver(p) {
     if (p.instance === evo.CLOUD_INSTANCE) await deliverSaavnTrackCloud(p2);
     else await deliverSaavnTrack(p2);
     p.rescuedSource = 'jiosaavn'; p.rescuedId = hit.id; p.videoId = undefined;
+    console.log('[music] rescue: -> Saavn se aaya:', hit.id);
     return;
   }
-  // Aakhri rasta: wahi gaana, DUSRA YouTube upload — kharab upload par atke
-  // rehne se dusra upload aksar chal jata hai (alag video, alag haal).
-  const alts = await searchSongs(rescueQueryFromTitle(p.title) || p.title, 8).catch(() => []);
-  const alt = pickAltUpload(alts, p.videoId);
-  if (!alt) throw new Error('rescue_no_match');
-  await deliverYtAny(p, alt.id, alt.url);
-  p.rescuedSource = 'yt'; p.rescuedId = alt.id; p.videoId = undefined;
+  // (2) Wahi gaana, DUSRA YouTube upload — kharab upload par atke rehne se
+  // dusra upload aksar chal jata hai (alag video, alag haal). Samay bacha
+  // ho tabhi — user ko kul intezaar ghataana hi is poore fix ka maksad hai.
+  if (elapsed() < 90_000) {
+    const alts = await searchSongs(rescueQueryFromTitle(p.title) || p.title, 8).catch(() => []);
+    const alt = pickAltUpload(alts, p.videoId);
+    if (alt) {
+      await deliverYtAny(p, alt.id, alt.url);
+      p.rescuedSource = 'yt'; p.rescuedId = alt.id; p.videoId = undefined;
+      console.log('[music] rescue: -> dusre YT upload se aaya:', alt.id);
+      return;
+    }
+  }
+  // (3) SoundCloud par wahi gaana — wahan bhi extraction ki deewaar nahi.
+  // Jo SC track abhi fail hua hai use dobara nahi uthayenge.
+  if (elapsed() < 120_000) {
+    const scHits = await searchSongsSc(rescueQueryFromTitle(p.title) || p.title, 6).catch(() => []);
+    const failedScId = p.source === 'soundcloud' ? (p.scId || p.videoId) : null;
+    const sc = (scHits || []).find((h) => h?.id && h.id !== failedScId && isSongLength(h));
+    if (sc) {
+      await deliverScAny(p, sc);
+      p.rescuedSource = 'soundcloud'; p.rescuedId = sc.id; p.videoId = undefined;
+      console.log('[music] rescue: -> SoundCloud se aaya:', sc.id);
+      return;
+    }
+  }
+  console.log('[music] rescue: koi rasta nahi chala:', String(p.title || '').slice(0, 60), `(${Math.round(elapsed() / 1000)}s)`);
+  throw new Error('rescue_no_match');
 }
 
 // Post-audio BUTTONS (Cloud) — Evolution par yahi kaam action LIST karti hai; Cloud par
@@ -462,6 +500,7 @@ const EXECUTORS = {
     // khatm (success ya fail) par paused. Presence kabhi main kaam ko nahi rokta
     // (sendPresence andar hi errors swallow karta hai, upar se .catch bhi hai).
     await evo.sendPresence(p.instance, p.to, 'composing', 20000).catch(() => {});
+    p._t0 = Date.now(); // rescue ke deadline hisaab ke liye (rescueDeliver)
     try {
       if (p.instance === evo.CLOUD_INSTANCE) {
         // CLOUD branch: saavn gaana LINK se jata hai; YT gaana download karke
@@ -711,7 +750,7 @@ async function tick() {
         await withTimeout(run(payload), TIMEOUTS[job.type] || 120_000);
         await finish(job, true);
       } catch (e) {
-        const lastTry = job.attempts >= MAX_ATTEMPTS;
+        const lastTry = job.attempts >= MAX_ATTEMPTS || job.type === 'music_download';
         await finish(job, false, String(e?.message || e));
         if (lastTry && payload.instance && payload.to) {
           if (job.type === 'music_download') {
