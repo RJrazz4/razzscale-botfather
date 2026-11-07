@@ -127,37 +127,57 @@ async function _downloadAudio(videoId, m4aPath) {
   // Verified recipe: datacenter IP se seedha audio format 403 deta hai;
   // android player_client se format 18 (mp4, AAC audio) chalta hai -> ffmpeg -c:a copy se .m4a (bina re-encode).
   // 2026-11-07 ke Render logs ki pakki wajah: kuch videos par YouTube
-  // "Failed to extract any player response" deta hai — wahi video bahar ke
-  // IP se turant khul gaya, matlab rukawat server ke mahol se hai. Isliye
-  // har koshish me IPv4 (-4 — YouTube IPv6 blocks ko zyada distrust karta
-  // hai) aur modern binary par --js-runtimes node (downloadArgs dekho).
-  // Client badal kar 3 koshishen (android -> tv -> ios), wahi format.
-  // Teeno fail = download_failed (phir worker ka cross-source rescue hai).
+  // "Failed to extract any player response" deta hai — SABSE NAYE yt-dlp
+  // (2026.10.26, khud-taaza wala) par bhi. Matlab rukawat server ke IP se
+  // hai, version se nahi; un videos ka ilaaj rescue hai (dusra source).
+  // SPEED (Hero ki 16:22 wali parakh ke baad): pehle clients ek ke baad
+  // ek chalte the — fail par 3 daur ka intezaar. Ab android+tv+web EK
+  // SAATH daudte hain, jo pehle le aaye wahi jeet-ta hai, baaki wahin rok
+  // diye jate hain; teeno fail hon to ios aakhri koshish. Safal bhi tez,
+  // fail bhi ab ~45s me pakka — user ghanto nahi latakta.
   initYtdlp();
   const { path: bin, modern } = ytdlpStatus();
-  const srcPath = path.join(env.musicTmp, `${videoId}.src.mp4`);
-  let downloaded = false;
+  const racers = ['android', 'tv', 'web'].map((client) => {
+    const src = path.join(env.musicTmp, `${videoId}.src.${client}.mp4`);
+    const pr = run(bin, downloadArgs(client, src, videoId, modern),
+      { timeout: 45_000, maxBuffer: 4 * 1024 * 1024 });
+    return { src, pr };
+  });
+  let winnerSrc = null;
   let lastErr = null;
-  for (const client of ['android', 'tv', 'ios']) {
-    try {
-      await run(bin, downloadArgs(client, srcPath, videoId, modern),
-        { timeout: 75_000, maxBuffer: 4 * 1024 * 1024 });
-      downloaded = true;
-      break;
-    } catch (e) { lastErr = e; try { fs.unlinkSync(srcPath); } catch { /* ignore */ } }
+  await new Promise((resolve) => {
+    let pending = racers.length;
+    for (const r of racers) {
+      r.pr.then(() => { if (!winnerSrc) winnerSrc = r.src; resolve(); })
+        .catch((e) => { lastErr = e; if (--pending === 0) resolve(); });
+    }
+  });
+  for (const r of racers) {
+    if (r.src !== winnerSrc) {
+      try { r.pr.child?.kill('SIGKILL'); } catch { /* pehle se band */ }
+      fs.promises.unlink(r.src).catch(() => {});
+    }
   }
-  if (!downloaded) {
-    console.error('[music] ytdlp failed (saare clients):', String(lastErr?.stderr || lastErr?.message || '').slice(0, 500));
+  if (!winnerSrc) {
+    const iosSrc = path.join(env.musicTmp, `${videoId}.src.ios.mp4`);
+    try {
+      await run(bin, downloadArgs('ios', iosSrc, videoId, modern),
+        { timeout: 40_000, maxBuffer: 4 * 1024 * 1024 });
+      winnerSrc = iosSrc;
+    } catch (e) { lastErr = e; fs.promises.unlink(iosSrc).catch(() => {}); }
+  }
+  if (!winnerSrc) {
+    console.error('[music] ytdlp failed (race + ios):', String(lastErr?.stderr || lastErr?.message || '').slice(0, 500));
     throw new Error('download_failed');
   }
   try {
-    await run(FFMPEG, ['-y', '-i', srcPath, '-vn', '-c:a', 'copy', m4aPath],
+    await run(FFMPEG, ['-y', '-i', winnerSrc, '-vn', '-c:a', 'copy', m4aPath],
       { timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
   } catch (e) {
     console.error('[music] ffmpeg failed:', String(e.stderr || e.message || '').slice(0, 500));
     throw new Error('convert_failed');
   } finally {
-    try { fs.unlinkSync(srcPath); } catch {}
+    try { fs.unlinkSync(winnerSrc); } catch {}
   }
   if (!fs.existsSync(m4aPath)) throw new Error('download_failed');
   if (fs.statSync(m4aPath).size > 16 * 1024 * 1024) throw new Error('audio_too_large'); // WhatsApp media cap
@@ -185,7 +205,7 @@ export async function searchSongsSc(query, limit = 8) {
   const { rows } = await pool.query('select results from music_cache where query_hash=$1', [hash]);
   if (rows[0]) return rows[0].results;
   initYtdlp();
-  const { stdout } = await run(ytdlpStatus().path, ['-J', '--flat-playlist', '--no-warnings', '-4', `scsearch${limit + 4}:${query}`], { timeout: 45_000, maxBuffer: 8 * 1024 * 1024 });
+  const { stdout } = await run(ytdlpStatus().path, ['-J', '--flat-playlist', '--no-warnings', '-4', `scsearch${limit + 4}:${query}`], { timeout: 20_000, maxBuffer: 8 * 1024 * 1024 });
   const json = JSON.parse(stdout);
   const results = (json?.entries || []).map(mapScEntry).filter(Boolean)
     .filter((t) => !(t.duration > MAX_SONG_SEC)).slice(0, limit);
