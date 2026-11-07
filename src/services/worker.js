@@ -444,7 +444,8 @@ async function rescueDeliver(p) {
   }
   // (3) Khoj se aur dusre uploads (2 tak) — wahi chaal, taazi khoj par.
   if (elapsed() < 180_000) {
-    const alts = pickAltUploads(await searchSongs(rescueQueryFromTitle(p.title) || p.title, 8).catch(() => []), [...tried], 2);
+    const rescueQ = rescueQueryFromTitle(p.title) || p.title;
+    const alts = pickAltUploads(await searchSongs(rescueQ, 8).catch(() => []), [...tried], 2, rescueQ);
     for (const alt of alts) {
       tried.add(alt.id);
       if (elapsed() > 200_000) break;
