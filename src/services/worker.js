@@ -520,6 +520,14 @@ const EXECUTORS = {
     // (sendPresence andar hi errors swallow karta hai, upar se .catch bhi hai).
     await evo.sendPresence(p.instance, p.to, 'composing', 20000).catch(() => {});
     p._t0 = Date.now(); // rescue ke deadline hisaab ke liye (rescueDeliver)
+    // WAIT UPDATE (2026-11-07 raat, Hero ka 4D order): delivery 30s se zyada
+    // lage to EK chhota update — chuppi me user "bot mar gaya" samajh kar
+    // chala jata hai. tick() job khatm hone par _waitDone=true kar deta hai,
+    // isliye gaana pahunchne ke baad ye update kabhi nahi jayega.
+    p._waitDone = false;
+    setTimeout(() => {
+      if (!p._waitDone) evo.sendText(p.instance, p.to, '⏳ Gaana mil raha hai — bas thoda sa aur, yahin raho 🎧').catch(() => {});
+    }, 30000);
     try {
       if (p.instance === evo.CLOUD_INSTANCE) {
         // CLOUD branch: saavn gaana LINK se jata hai; YT gaana download karke
@@ -771,8 +779,10 @@ async function tick() {
       if (!run) { await finish(job, false, 'unknown_type'); continue; }
       try {
         await withTimeout(run(payload), TIMEOUTS[job.type] || 120_000);
+        payload._waitDone = true;
         await finish(job, true);
       } catch (e) {
+        payload._waitDone = true;
         const lastTry = job.attempts >= MAX_ATTEMPTS || job.type === 'music_download';
         await finish(job, false, String(e?.message || e));
         if (lastTry && payload.instance && payload.to) {
