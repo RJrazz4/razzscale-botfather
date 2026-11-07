@@ -198,10 +198,19 @@ export function pickSaavnRescue(ytTitle, candidates) {
  *  natija — kharab upload par atke rehne se dusra upload aksar chal jata
  *  hai. Pure. */
 export function pickAltUpload(results, failedId) {
+  return pickAltUploads(results, [failedId], 1)[0] || null;
+}
+
+/** Kai dusre uploads ek saath (rescue v3): bahar rakhe ids chhod kar,
+ *  kram barkarar, zyada se zyada n. Pure. */
+export function pickAltUploads(results, excludeIds, n = 3) {
+  const ex = new Set(Array.isArray(excludeIds) ? excludeIds : [excludeIds]);
+  const out = [];
   for (const r of results || []) {
-    if (!r?.id || r.id === failedId) continue;
+    if (out.length >= n) break;
+    if (!r?.id || ex.has(r.id)) continue;
     if (!isSongLength(r)) continue;
-    return r;
+    out.push(r);
   }
-  return null;
+  return out;
 }
