@@ -8,6 +8,7 @@ import * as telegram from './telegram.js';
 import { getAudioForVideo, searchSongs } from './music.js';
 import { getFreshUrl, withQuality } from './jiosaavn.js';
 import { markSent } from './musicMemory.js';
+import { startSeeder } from './librarySeeder.js';
 import { freeChat, workWrite } from './llm.js';
 import { notifyOwner } from './owner.js';
 
@@ -607,5 +608,6 @@ export function startWorker() {
   // Boot par atke hue 'running' jobs ko wapas pending karo (crash/restart recovery)
   pool.query("update jobs set status='pending' where status='running'").catch(() => {});
   timer = setInterval(() => { tick().catch(() => {}); }, 1500);
+  startSeeder(); // Auto Library (2026-11-07) — apni dheere gati se, user jobs hamesha pehle
   console.log('[worker] jobs worker shuru');
 }
