@@ -1,4 +1,4 @@
-import { searchSongsSaavn, foldText, queryOverlap, MAX_SONG_SEC } from './jiosaavn.js';
+import { searchSongsSaavn, foldText, queryOverlap, MAX_SONG_SEC, distinctiveWords, scoreSaavnSong } from './jiosaavn.js';
 import { searchSongs, deadVideoIds, searchSongsSc } from './music.js';
 
 /** Gaana delivery ke layak hai? Duration pata ho aur 10-min cap se lamba ho
@@ -115,6 +115,31 @@ export async function searchMusicMerged(query, limit = 8, opts = {}) {
     pool.push({ track: t, score: s });
   });
   for (const t of scRaw) if (isSongLength(t)) pool.push({ track: t, score: scoreScTrack(t, query) });
+  // CORE EXPANSION (2026-11-07 raat, live saboot ke saath): kuch mashhoor
+  // gaane ka naam EK shabd hota hai ("Zaroorat") — poori phrase wali khoj
+  // ("Mujhe Teri jarurat hai") par dono engine usi phrase wale BHAJAN/cover
+  // dikhate hain, asli film-gaana khoj me aata hi nahi (Saavn par parkha:
+  // Mustafa Zahid wala track phrase-search me hai hi nahi). Isliye typed
+  // search par khaas-shabd se EK aur khoj chalti hai; uske natije POORI
+  // query par naape jate hain, taaki wohi tarazu sab par lage.
+  if (opts.strict) {
+    const coreQ = distinctiveWords(query).join(' ');
+    if (coreQ && coreQ !== foldText(query)) {
+      const [s2, y2, c2] = await Promise.allSettled([
+        searchSongsSaavn(coreQ, 8),
+        searchSongs(coreQ, 8),
+        searchSongsSc(coreQ, 8),
+      ]);
+      const seen = new Set(pool.map((e) => `${e.track.source}:${e.track.id}`));
+      const add = (t, score) => {
+        const k = `${t.source}:${t.id}`;
+        if (!seen.has(k) && isSongLength(t)) { seen.add(k); pool.push({ track: t, score }); }
+      };
+      if (s2.status === 'fulfilled') for (const t of s2.value || []) add(t, scoreSaavnSong(t, query));
+      if (y2.status === 'fulfilled') (y2.value || []).forEach((t, i) => add(t, scoreYtTrack(t, query, i, (y2.value || []).length)));
+      if (c2.status === 'fulfilled') for (const t of c2.value || []) add(t, scoreScTrack(t, query));
+    }
+  }
   // STRICT GATE (2026-11-07 raat, typed search par hi): gaane ke naam se
   // ZERO mel wala track chahe kitna bhi mashhoor ho (plays/views), woh IS
   // khoj ka gaana nahi hai — "Officially Mujhe teri jarurat hai" par Ek
