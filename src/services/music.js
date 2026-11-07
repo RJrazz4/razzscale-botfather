@@ -81,7 +81,7 @@ export function downloadArgs(client, srcPath, videoId, modern) {
 export async function searchSongs(query, limit = 8) {
   // v3 (2026-11-07): lambe-mix filter ke baad purana v2 cache bekaar — usme
   // 1-ghante wale playlist phanse hue hain, woh dobara na aayen.
-  const hash = crypto.createHash('sha256').update(`v3:${limit}:${query.toLowerCase().trim()}`).digest('hex');
+  const hash = crypto.createHash('sha256').update(`v4:${limit}:${query.toLowerCase().trim()}`).digest('hex');
   const { rows } = await pool.query('select results from music_cache where query_hash=$1', [hash]);
   if (rows[0]) return rows[0].results;
   // limit+4 isliye: lambe mix filter me nikal jayenge, peeche purti rahe.
@@ -201,7 +201,7 @@ export function mapScEntry(e) {
 }
 
 export async function searchSongsSc(query, limit = 8) {
-  const hash = crypto.createHash('sha256').update(`sc1:${limit}:${query.toLowerCase().trim()}`).digest('hex');
+  const hash = crypto.createHash('sha256').update(`sc2:${limit}:${query.toLowerCase().trim()}`).digest('hex');
   const { rows } = await pool.query('select results from music_cache where query_hash=$1', [hash]);
   if (rows[0]) return rows[0].results;
   initYtdlp();
