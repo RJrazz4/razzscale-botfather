@@ -102,7 +102,7 @@ export async function findRepeat(userId, query) {
   const qVersion = versionWordsIn(normalizeText(query).split(' ').filter(Boolean));
 
   const { rows } = await pool.query(
-    'select * from listening_history where user_id=$1 order by request_count desc, last_requested_at desc limit 100',
+    "select * from listening_history where user_id=$1 and status='sent' order by request_count desc, last_requested_at desc limit 100",
     [userId]);
   for (const row of rows) {
     const titleTokens = (row.normalized_title || '').split(' ').filter(Boolean);
@@ -137,7 +137,7 @@ function isoNow() {
 export async function recordPick({ userId, waId, pick, query }) {
   if (!userId || !pick?.id) return;
   await ensureMusicHistory();
-  const provider = pick.source === 'jiosaavn' ? 'jiosaavn' : 'yt';
+  const provider = pick.source === 'jiosaavn' ? 'jiosaavn' : (pick.source === 'soundcloud' ? 'soundcloud' : 'yt');
   const songTitle = provider === 'jiosaavn' ? (pick.song || pick.title || '') : (pick.title || '');
   const artist = provider === 'jiosaavn' ? (pick.artist || '') : (pick.channel || '');
   const now = isoNow();
@@ -147,7 +147,7 @@ export async function recordPick({ userId, waId, pick, query }) {
      on conflict (user_id, provider, provider_id) do update set
        last_requested_at = excluded.last_requested_at,
        request_count = listening_history.request_count + 1,
-       status = 'selected',
+       status = case when listening_history.status = 'sent' then 'sent' else 'selected' end,
        last_query = coalesce(excluded.last_query, listening_history.last_query),
        title = excluded.title,
        artist = excluded.artist,
@@ -176,5 +176,5 @@ export async function markSent(userId, provider, providerId) {
   await ensureMusicHistory();
   await pool.query(
     `update listening_history set status='sent' where user_id=$1 and provider=$2 and provider_id=$3`,
-    [userId, provider === 'jiosaavn' ? 'jiosaavn' : 'yt', String(providerId)]);
+    [userId, provider === 'jiosaavn' ? 'jiosaavn' : (provider === 'soundcloud' ? 'soundcloud' : 'yt'), String(providerId)]);
 }
