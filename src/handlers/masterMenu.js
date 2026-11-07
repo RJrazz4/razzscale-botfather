@@ -120,7 +120,7 @@ async function sendMusicZone(inst, from) {
 }
 
 // --- Music results helpers (KDMusic-style: 8 results, 3-3 ke pages, tappable list + number fallback) ---
-const MUSIC_PAGE = 3;
+const MUSIC_PAGE = 6; // 2026-11-07 raat: 3 bahut kam the — sahi gaana aksar 'More' ke peeche chhupta tha; 6 gaane + More + Back + Menu = 9 rows, WhatsApp ki 10-row hadd ke andar
 function musicPageText(results, fromIdx, toIdx) {
   const lines = results.slice(fromIdx, toIdx).map((r, i) => `${fromIdx + i + 1}. ${r.title}`).join('\n');
   const moreLine = toIdx < results.length ? '\nAur results ke liye "more" likho 👇' : '';
