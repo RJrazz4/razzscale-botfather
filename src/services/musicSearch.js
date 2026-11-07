@@ -127,3 +127,51 @@ export function prefetchTargets(results, limit = 3) {
   }
   return out;
 }
+
+// ---------- CROSS-SOURCE RESCUE ke helpers (2026-11-07) ----------
+// Ek source fail ho jaye to wahi gaana dusre source se lane ke liye pehchan
+// sakht rakhi hai: galat gaana bhejna, fail se bhi bura hai.
+const RESCUE_NOISE = new Set(['official', 'video', 'song', 'full', 'hd', '4k', '8k', 'lyrical', 'lyrics', 'audio', 'new', 'latest', 'mp3', 'feat', 'ft', 'hq']);
+
+/** YT ke lambe title se saaf khoj-shabd: pehla hissa (| se pehle), brackets
+ *  bahar, "Artist - Song" ho to gaane wala hissa, noise shabd bahar. Pure. */
+export function rescueQueryFromTitle(title) {
+  let s = String(title || '').split('|')[0]
+    .replace(/\[[^\]]*\]/g, ' ').replace(/\([^)]*\)/g, ' ');
+  const parts = s.split(/\s*[—–-]\s*/).filter(Boolean);
+  if (parts.length >= 2) s = parts.slice(1).join(' ');
+  const words = foldText(s).split(' ').filter((w) => w && !RESCUE_NOISE.has(w));
+  return [...new Set(words)].join(' ');
+}
+
+/** Saavn natijon me se wahi gaana chuno jo YT title se PAKKA mel khaye:
+ *  khoj ka pehla shabd (sabse pehchan wala) lazmi, kul mel >= 70%.
+ *  Mel na ho to null — galat gaana kabhi nahi jayega. Pure. */
+export function pickSaavnRescue(ytTitle, candidates) {
+  const q = rescueQueryFromTitle(ytTitle);
+  if (!q) return null;
+  const qWords = q.split(' ');
+  let best = null;
+  let bestScore = 0;
+  for (const c of candidates || []) {
+    if (!c?.id) continue;
+    const hayWords = new Set(foldText(`${c.song || c.title || ''} ${c.artist || ''}`).split(' ').filter(Boolean));
+    if (!hayWords.has(qWords[0])) continue;
+    const hits = qWords.filter((w) => hayWords.has(w)).length;
+    const score = hits / qWords.length;
+    if (score >= 0.7 && score > bestScore) { best = c; bestScore = score; }
+  }
+  return best;
+}
+
+/** Rescue ke liye DUSRA upload: fail hue video se alag pehla length-ok
+ *  natija — kharab upload par atke rehne se dusra upload aksar chal jata
+ *  hai. Pure. */
+export function pickAltUpload(results, failedId) {
+  for (const r of results || []) {
+    if (!r?.id || r.id === failedId) continue;
+    if (!isSongLength(r)) continue;
+    return r;
+  }
+  return null;
+}
