@@ -1,4 +1,4 @@
-import { searchSongsSaavn, foldText, queryOverlap, MAX_SONG_SEC, distinctiveWords, scoreSaavnSong } from './jiosaavn.js';
+import { searchSongsSaavn, foldText, queryOverlap, MAX_SONG_SEC, distinctiveWords, scoreSaavnSong, looseFold } from './jiosaavn.js';
 import { searchSongs, deadVideoIds, searchSongsSc } from './music.js';
 
 /** Gaana delivery ke layak hai? Duration pata ho aur 10-min cap se lamba ho
@@ -35,6 +35,20 @@ export function scoreYtTrack(track, query, position = 0, total = 8) {
   // apne kram par halka bharosa — pehle wale natije ko thoda zyada.
   score += views > 0 ? 1.15 * Math.log10(views + 1) : Math.max(0, 3.2 - position * 0.35);
   if (MAJOR_CHANNEL_WORDS.some((w) => channelF.includes(w))) score += 1.2;
+  // CANONICAL (2026-11-07 raat): bade label ke channel par woh upload jiske
+  // naam ke PEHLE hisse ke saare khaas shabd user ki khoj me hain, wohi us
+  // gaane ka asli upload hai (T-Series ka "Zaroorat" — title ke aage film/
+  // actor ke naam hote hain, isliye sirf pehla hissa naapo). Views kabhi
+  // kabhi khoj ke natijon me milte hi nahi — ye pehchan bina views ke bhi
+  // asli ko upar rakhti hai. Nakli clickbait upload isme nahi phansta:
+  // uska channel major label ka hota hi nahi.
+  {
+    const qD = distinctiveWords(query).map((w) => looseFold(w));
+    const firstSeg = (track.title || '').split('|')[0].split(' - ')[0];
+    const tD = distinctiveWords(firstSeg).map((w) => looseFold(w));
+    const segMatch = tD.length > 0 && tD.every((w) => qD.some((qw) => qw === w || (qw.length >= 4 && w.length >= 4 && (qw.includes(w) || w.includes(qw)))));
+    if (segMatch && MAJOR_CHANNEL_WORDS.some((w) => channelF.includes(w))) score += 3.5;
+  }
   if (allText.includes('official')) score += 0.5;
   // ⭐ OFFICIAL CHANNEL PEHCHAN (Hero, 2026-11-06 raat — Telegram wale music
   // boton wala jugaad): gaana usi ke channel se pehle mile jiska woh hai —
@@ -186,6 +200,9 @@ export async function searchMusicMerged(query, limit = 8, opts = {}) {
       if (dead.size) final = final.filter((t) => t.source === 'jiosaavn' || !dead.has(t.id));
     }
   } catch { /* upar likha hai — search nahi rukegi */ }
+  // LOG (2026-11-07 raat): har khoj ka antim kram log me — "nahi aa raha"
+  // wali shikayat par ab andhere me teer nahi chalega; pool khud bolega.
+  console.log(`[music-search] q="${query}" strict=${!!opts.strict} top: ${final.map((t, i) => `${i + 1})${t.source}:${(t.title || t.song || '').slice(0, 40)}(${t._score ?? '?'})`).join(' ')}`);
   return final;
 }
 
