@@ -5,7 +5,7 @@ import { setFlow, getFlow, logUsage } from '../db/pool.js';
 import { spawnSubBot } from '../services/spawner.js';
 import { searchSongs } from '../services/music.js';
 import { searchSongsSaavn } from '../services/jiosaavn.js';
-import { searchMusicMerged } from '../services/musicSearch.js';
+import { searchMusicMerged, prefetchTargets } from '../services/musicSearch.js';
 import { findRepeat, recordPick, getRecent } from '../services/musicMemory.js';
 import { enqueueJob } from '../services/worker.js';
 import { vipMenuText, vipPitchText, VIP_FEATURES } from './vip.js';
@@ -237,6 +237,15 @@ async function runMusicSearch(ctx, query, fromKind) {
   }
   const shown = Math.min(MUSIC_PAGE, results.length);
   await setFlow(user.id, 'master', { step: 'music_pick', results, shown, query, from: fromKind, lastTitle: flow?.lastTitle }, FLOW_TTL);
+  // PREFETCH (2026-11-07, Hero ka logic): list bante hi dikhaye gaye page ke
+  // YT gaano ka download peeche se shuru — user tap kare, tab tak file
+  // disk/vault me taiyaar. Search ho ya category/trending, ye function
+  // dono ka saanjha rasta hai — isliye har list par lagega. Dedupe
+  // idempotency key se hai; user ke pick jobs kataar me hamesha aage rehte
+  // hain (worker claimNext ki priority).
+  for (const tg of prefetchTargets(results.slice(0, shown))) {
+    enqueueJob('music_prefetch', { videoId: tg.videoId, title: tg.title }, `prefetch:${tg.videoId}`).catch(() => {});
+  }
   // DESIGN (2026-11-06, wahi duplicate-screen report): results bhi pehle SIRF
   // tappable list — poora text page sirf list fail hone par jayega. ('more'
   // wale aage ke pages pehle ki tarah text hi rahenge — list budget ka niyam.)
