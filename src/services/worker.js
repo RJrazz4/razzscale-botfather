@@ -7,6 +7,7 @@ import * as graph from './graph-cloud.js';
 import * as telegram from './telegram.js';
 import { getAudioForVideo, searchSongs } from './music.js';
 import { getFreshUrl, withQuality } from './jiosaavn.js';
+import { markSent } from './musicMemory.js';
 import { freeChat, workWrite } from './llm.js';
 import { notifyOwner } from './owner.js';
 
@@ -87,15 +88,18 @@ function withTimeout(promise, ms) {
   return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('job_timeout')), ms))]);
 }
 
-// Post-audio ACTION LIST (TAP-FIRST) — success par lyrics/music_new/menu wale 3 rows;
-// failure par gaana nahi aaya, isliye lyrics row nahi — sirf music_new/menu.
+// Post-audio ACTION LIST (TAP-FIRST) — success par 4 rows: lyrics /
+// music_list (wahi results list dobara) / music_new / menu; failure par
+// gaana nahi aaya, isliye lyrics aur list wale rows nahi — sirf music_new/menu.
 // RowIds masterMenu me text bankar handle hote hain ('lyrics' keyword branch,
-// 'music_new'/'mz'/TAP mapping, 'menu' keyword branch, 'nav_menu' global nav).
+// 'music_list' branch, 'music_new'/'mz'/TAP mapping, 'menu' keyword branch,
+// 'nav_menu' global nav).
 // Return: list bheji gayi ya nahi (false par caller text fallback bhejta hai).
 async function sendMusicActionList(instance, to, ok) {
   const rows = ok
     ? [
       { rowId: 'lyrics', title: '🔤 Is gaane ke Lyrics', description: 'Isi gaane ke bol dekho' },
+      { rowId: 'music_list', title: '🎵 Gaana chuno', description: 'Wahi list dobara — dusra gaana chuno' },
       { rowId: 'music_new', title: '🔍 Naya gaana khojo', description: 'Koi aur gaana sunna hai' },
       { rowId: 'menu', title: '🏠 Menu par wapas', description: 'Saari services dekho' },
     ]
@@ -314,11 +318,16 @@ const EXECUTORS = {
           throw new Error('cloud_yt_link_only');
         }
         await moveBusyState(p.userId, p.videoId, { step: 'music_done', lastTitle: p.title });
-        const btns = await sendMusicActionButtons(p.to, true);
-        if (!btns) {
+        // 4 options chahiye (Lyrics/Gaana chuno/Naya gaana/Menu) — WhatsApp
+        // reply buttons zyada se zyada 3 hote hain, isliye success par ab
+        // LIST jayegi (categories/results bhi list hi hain, user aadat me hai).
+        // Failure wala rasta (2 buttons) sendMusicActionButtons par hi hai.
+        const listed = await sendMusicActionList(p.instance, p.to, true);
+        if (!listed) {
           await evo.sendText(p.instance, p.to, "Lyrics chahiye to 'lyrics' likh do 🎵").catch(() => {});
         }
         if (p.userId) await logUsage(p.userId, 'music').catch(() => {});
+        if (p.userId) await markSent(p.userId, p.source, p.source === 'jiosaavn' ? p.songId : p.videoId).catch(() => {});
         return;
       }
       if (p.source === 'jiosaavn' && p.songId) {
@@ -344,6 +353,7 @@ const EXECUTORS = {
         await evo.sendText(p.instance, p.to, "Lyrics chahiye to 'lyrics' likh do 🎵").catch(() => {});
       }
       if (p.userId) await logUsage(p.userId, 'music').catch(() => {});
+      if (p.userId) await markSent(p.userId, p.source, p.source === 'jiosaavn' ? p.songId : p.videoId).catch(() => {});
     } finally {
       await evo.sendPresence(p.instance, p.to, 'paused', 1000).catch(() => {});
     }
@@ -480,7 +490,12 @@ async function moveBusyState(userId, videoId, next) {
   try {
     const f = await getFlow(userId, 'master');
     if (f?.step === 'music_busy' && (!videoId || f.videoId === videoId)) {
-      await setFlow(userId, 'master', next, 1800);
+      // Results aage badhao (2026-11-07): delivery ke baad ke "Gaana chuno"
+      // option ko wahi list chahiye jo pick ke samay thi — busy state me
+      // masterMenu use pehle se rakhta hai, yahan use done tak le jana hai.
+      const carry = {};
+      if (Array.isArray(f.results) && f.results.length) { carry.results = f.results; carry.shown = f.shown; carry.query = f.query; }
+      await setFlow(userId, 'master', { ...next, ...carry }, 1800);
     }
   } catch { /* state na badle to guard agle user action par khud saaf ho jayega */ }
 }
