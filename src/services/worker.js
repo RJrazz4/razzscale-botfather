@@ -5,7 +5,7 @@ import { env } from '../config/env.js';
 import * as evo from './transport.js';
 import * as graph from './graph-cloud.js';
 import * as telegram from './telegram.js';
-import { getAudioForVideo, searchSongs } from './music.js';
+import { getAudioForVideo, searchSongs, noteDownloadFailure } from './music.js';
 import { getFreshUrl, withQuality } from './jiosaavn.js';
 import { markSent } from './musicMemory.js';
 import { startSeeder } from './librarySeeder.js';
@@ -14,7 +14,7 @@ import { notifyOwner } from './owner.js';
 
 // Async Worker (Architecture V2.1, plan §3): heavy kaam (music download, AI chat) webhook handler
 // se bahar, SQLite jobs table ke peeche. Idempotency: ek idempotency_key wala kaam do baar nahi bhejta.
-const TIMEOUTS = { music_download: 240_000, ai_chat: 120_000, lyrics: 30_000, likhai_work: 120_000 };
+const TIMEOUTS = { music_download: 240_000, music_prefetch: 240_000, ai_chat: 120_000, lyrics: 30_000, likhai_work: 120_000 };
 const MAX_ATTEMPTS = 2;
 
 // ⭐ Escalation ki shabd-pakad (v1): Boss/insaan se baat, ya action-level
@@ -42,10 +42,14 @@ export async function enqueueJob(type, payload, idempotencyKey) {
   return { id: null, queued: false };
 }
 
-async function claimNext() {
+export async function claimNext() {
+  // Priority: user ke pick (music_download) hamesha pehle, baaki kaam beech
+  // me, prefetch sabse peeche — kataar me pada prefetch kisi user ko kabhi
+  // intezaar nahi karayega (2026-11-07).
   const { rows } = await pool.query(
     `update jobs set status='running', attempts=attempts+1, updated_at=$1
-     where id = (select id from jobs where status='pending' order by id asc limit 1)
+     where id = (select id from jobs where status='pending'
+       order by (case when type='music_download' then 0 when type='music_prefetch' then 2 else 1 end), id asc limit 1)
      returning *`, [new Date().toISOString()]);
   return rows[0] || null;
 }
@@ -364,6 +368,14 @@ async function sendMusicActionButtons(to, ok) {
 }
 
 const EXECUTORS = {
+  // PREFETCH (2026-11-07, Hero ka logic): list bante hi peeche se download —
+  // sirf file taiyaar karni hai (disk + vault backup), bhejna NAHI. User
+  // tap kare to pick wali delivery wahi taiyaar file uthayegi. Fail par
+  // dead-nishan (2 fail = list se gayab).
+  async music_prefetch(p) {
+    try { await getAudioForVideo(p.videoId, p.title); }
+    catch (e) { await noteDownloadFailure(p.videoId).catch(() => {}); throw e; }
+  },
   // Music: vault/disk/cold se audio lao aur WhatsApp par bhejo.
   // Footer rule: audio delivery = footer ON (caption me).
   // TAP-FIRST (KDMusic-style): delivery ke turant baad ACTION LIST — user ko kuch type nahi karna.
@@ -592,6 +604,11 @@ async function tick() {
         await finish(job, false, String(e?.message || e));
         if (lastTry && payload.instance && payload.to) {
           if (job.type === 'music_download') {
+            // YT pick ka pakka fail — dead-nishan lagao taaki woh video aage
+            // ki lists me aaye hi nahi (2 fail par search use hata deta hai)
+            if (payload.source !== 'jiosaavn' && payload.videoId) {
+              await noteDownloadFailure(payload.videoId).catch(() => {});
+            }
             // Fail pakka ho gaya — busy guard hatao, user Music Zone se dobara try kar sakta hai
             await moveBusyState(payload.userId, payload.videoId, { step: 'music_zone', lastTitle: payload.title });
             await sendMusicFailure(payload).catch(() => {});
