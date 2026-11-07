@@ -6,7 +6,7 @@ import { spawnSubBot } from '../services/spawner.js';
 import { searchSongs } from '../services/music.js';
 import { searchSongsSaavn } from '../services/jiosaavn.js';
 import { searchMusicMerged } from '../services/musicSearch.js';
-import { findRepeat, recordPick } from '../services/musicMemory.js';
+import { findRepeat, recordPick, getRecent } from '../services/musicMemory.js';
 import { enqueueJob } from '../services/worker.js';
 import { vipMenuText, vipPitchText, VIP_FEATURES } from './vip.js';
 import { handleConsult, resendConsultScreen, CONSULT_BACK } from './consult.js';
@@ -90,6 +90,7 @@ export function zoneRows() {
   // khojne aata hai — category baad me. RowIds wahi purane, sirf kram badla.
   return [
     { rowId: 'cat_search', title: '🔍 Gaana Search Karo', description: 'Apne gaane ka naam likho' },
+    { rowId: 'music_recent', title: '🕘 Recently Played', description: 'Tumhare pichhle gaane — tap karke phir suno' },
     ...Object.entries(CATEGORIES).map(([id, c]) => ({ rowId: id, title: c.label, description: `${c.label.replace(/^\S+\s/, '')} gaane suno` })),
     { rowId: 'nav_menu', title: '🏠 Main Menu', description: 'Home par wapas' },
   ];
@@ -106,7 +107,7 @@ async function sendMusicZone(inst, from) {
   }).then(() => true).catch(() => false);
   if (!listed) {
     await evo.sendText(inst, from, '🎵 *Music Zone*\n\nCategory tap karo — ya number likho:\n\n' +
-      ['1. 🔍 Gaana Search Karo', ...Object.values(CATEGORIES).map((c, i) => `${i + 2}. ${c.label}`)].join('\n'));
+      ['1. 🔍 Gaana Search Karo', '2. 🕘 Recently Played', ...Object.values(CATEGORIES).map((c, i) => `${i + 3}. ${c.label}`)].join('\n'));
   }
 }
 
@@ -142,6 +143,32 @@ async function sendMusicList(inst, from, results, shown) {
     description: 'Tap karke gaana chuno — ya number likh do 👇',
     sections: [{ title: 'Results', rows: musicListRows(results, shown) }],
   }).then(() => true).catch(() => false);
+}
+// RECENTLY PLAYED (2026-11-07, Hero ki manjuri): listening_history se user ke
+// pichhle gaane — wahi pick wali list, tap karte hi aam pick flow se wahi
+// gaana dobara bajta hai (aur ginati history me badhti hai). History khaali
+// ho to saaf text + zone wahi rehta hai — dead end nahi.
+async function sendRecentList(ctx) {
+  const { user, from, inst, flow } = ctx;
+  let rows = [];
+  try { rows = await getRecent(user.id, 8); } catch { rows = []; }
+  if (!rows.length) {
+    await evo.sendText(inst, from, 'Abhi tak tumne koi gaana nahi suna 🎵 — pehle Search se apna gaana khoj kar suno, phir woh yahan milega.');
+    return;
+  }
+  const results = rows.map((r) => ({
+    id: r.provider_id, title: r.title, source: r.provider,
+    url: r.ref_url || undefined, duration: r.duration_sec || undefined,
+    artist: r.artist || undefined, channel: r.provider === 'yt' ? (r.artist || undefined) : undefined,
+  }));
+  const shown = Math.min(MUSIC_PAGE, results.length);
+  await setFlow(user.id, 'master', { step: 'music_pick', results, shown, query: 'recent', from: 'recent', lastTitle: flow?.lastTitle }, FLOW_TTL);
+  const listed = await evo.sendList(inst, from, {
+    title: '🕘 Recently Played', buttonText: 'Gaana Chuno',
+    description: 'Tumhare pichhle gaane — tap karo, wahi gaana phir bajega 👇',
+    sections: [{ title: 'Pichhle gaane', rows: musicListRows(results, shown) }],
+  }).then(() => true).catch(() => false);
+  if (!listed) await evo.sendText(inst, from, musicPageText(results, 0, shown));
 }
 // Khali results (brief §11 — empty state): saaf message + doosri category/search/menu ke rows
 async function sendMusicEmpty(inst, from) {
@@ -355,7 +382,9 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
           url: pick.source === 'jiosaavn' ? undefined : pick.url },
         `music:${msgId || `${user.id}:${pick.id}:${Date.now()}`}`);
       // SMART MUSIC MEMORY: pick history me likho (repeat detection ki neev).
-      recordPick({ userId: user.id, waId: from, pick, query: flow.query }).catch(() => {});
+      // 'recent' wali list se pick hua ho to woh asal khoj-query nahi hai —
+      // last_query me use mat ghusao (purani achhi query surakshit rahe).
+      recordPick({ userId: user.id, waId: from, pick, query: flow.query && flow.query !== 'recent' ? flow.query : undefined }).catch(() => {});
       return;
     }
     // Number/more nahi hai — par RESULTS khule hue hain aur user ne koi naam
@@ -412,9 +441,13 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
       await evo.sendText(inst, from, 'Gaane ka naam bhejo — main top results dunga.');
       return;
     }
+    if (t === 'music_recent' || ['2', 'recent'].includes(lower)) {
+      await sendRecentList(ctx);
+      return;
+    }
     const zn = Number(t);
-    if (Number.isInteger(zn) && zn >= 2 && zn <= 7) {
-      const catId = Object.keys(CATEGORIES)[zn - 2];
+    if (Number.isInteger(zn) && zn >= 3 && zn <= 8) {
+      const catId = Object.keys(CATEGORIES)[zn - 3];
       await runMusicSearch(ctx, CATEGORIES[catId].query, 'category');
       return;
     }
