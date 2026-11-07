@@ -61,14 +61,23 @@ export async function downloadAudio(videoId) {
 async function _downloadAudio(videoId, m4aPath) {
   // Verified recipe: datacenter IP se seedha audio format 403 deta hai;
   // android player_client se format 18 (mp4, AAC audio) chalta hai -> ffmpeg -c:a copy se .m4a (bina re-encode).
+  // Kuch videos ek client ko rok dete hain — isliye client badal kar 3
+  // koshishen (android -> ios -> tv), wahi format. Teeno fail = download_failed.
   const srcPath = path.join(env.musicTmp, `${videoId}.src.mp4`);
-  try {
-    await run(env.ytdlp, ['-f', '18/best[height<=360]/best', '--no-warnings',
-      '--extractor-args', 'youtube:player_client=android',
-      '-o', srcPath, `https://www.youtube.com/watch?v=${videoId}`],
-      { timeout: 180_000, maxBuffer: 4 * 1024 * 1024 });
-  } catch (e) {
-    console.error('[music] ytdlp failed:', String(e.stderr || e.message || '').slice(0, 500));
+  let downloaded = false;
+  let lastErr = null;
+  for (const client of ['android', 'ios', 'tv']) {
+    try {
+      await run(env.ytdlp, ['-f', '18/best[height<=360]/best', '--no-warnings',
+        '--extractor-args', `youtube:player_client=${client}`,
+        '-o', srcPath, `https://www.youtube.com/watch?v=${videoId}`],
+        { timeout: 180_000, maxBuffer: 4 * 1024 * 1024 });
+      downloaded = true;
+      break;
+    } catch (e) { lastErr = e; try { fs.unlinkSync(srcPath); } catch { /* ignore */ } }
+  }
+  if (!downloaded) {
+    console.error('[music] ytdlp failed (saare clients):', String(lastErr?.stderr || lastErr?.message || '').slice(0, 500));
     throw new Error('download_failed');
   }
   try {
@@ -83,6 +92,39 @@ async function _downloadAudio(videoId, m4aPath) {
   if (!fs.existsSync(m4aPath)) throw new Error('download_failed');
   if (fs.statSync(m4aPath).size > 16 * 1024 * 1024) throw new Error('audio_too_large'); // WhatsApp media cap
   return m4aPath;
+}
+
+// ---------- DEAD VIDEO NISHAAN (2026-11-07, Hero: "jo bajta nahi woh list me kyun hai") ----------
+// Jo YT video 2+ baar download fail ho jaye, us par nishan lag jata hai aur
+// searchMusicMerged use list se hata deta hai. Nishan kabhi purana nahi
+// hota — video asal me mare hue hote hain (private/region-block), aur
+// galti se koi zinda video phas jaye to bhi usi gaane ke dusre uploads
+// list me rehte hain.
+let deadTableReady = null;
+function ensureDeadTable() {
+  if (!deadTableReady) {
+    deadTableReady = pool.query(`create table if not exists music_dead (
+      video_id text primary key, fails integer not null default 0, updated_at text not null
+    )`).catch((e) => { deadTableReady = null; throw e; });
+  }
+  return deadTableReady;
+}
+export async function noteDownloadFailure(videoId) {
+  if (!videoId) return;
+  await ensureDeadTable();
+  await pool.query(
+    `insert into music_dead (video_id, fails, updated_at) values ($1, 1, $2)
+     on conflict (video_id) do update set fails = music_dead.fails + 1, updated_at = excluded.updated_at`,
+    [videoId, new Date().toISOString()]);
+}
+export async function deadVideoIds(ids) {
+  const list = [...new Set((ids || []).filter(Boolean))];
+  if (!list.length) return new Set();
+  await ensureDeadTable();
+  const ph = list.map((_, i) => `$${i + 1}`).join(',');
+  const { rows } = await pool.query(
+    `select video_id from music_dead where fails >= 2 and video_id in (${ph})`, list);
+  return new Set(rows.map((r) => r.video_id));
 }
 
 // Vault-aware getter (V2.1, plan §2.2): order = Telegram media_vault -> local disk -> yt-dlp cold.
