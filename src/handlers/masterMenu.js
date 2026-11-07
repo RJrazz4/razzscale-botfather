@@ -200,6 +200,7 @@ async function deliverRepeat(ctx, hit, query) {
   await enqueueJob('music_download',
     { instance: inst, to: from, userId: user.id, videoId: hit.provider_id, title: hit.title,
       source: hit.provider, songId: hit.provider === 'jiosaavn' ? hit.provider_id : undefined,
+      scId: hit.provider === 'soundcloud' ? hit.provider_id : undefined,
       url: hit.provider === 'jiosaavn' ? undefined : (hit.ref_url || `https://www.youtube.com/watch?v=${hit.provider_id}`) },
     `music:repeat:${user.id}:${hit.provider_id}:${Date.now()}`);
   recordPick({ userId: user.id, waId: from, pick: { id: hit.provider_id, source: hit.provider, title: hit.title, artist: hit.artist || '', durationSec: hit.duration_sec, url: hit.ref_url }, query }).catch(() => {});
@@ -244,7 +245,8 @@ async function runMusicSearch(ctx, query, fromKind) {
   // idempotency key se hai; user ke pick jobs kataar me hamesha aage rehte
   // hain (worker claimNext ki priority).
   for (const tg of prefetchTargets(results.slice(0, shown))) {
-    enqueueJob('music_prefetch', { videoId: tg.videoId, title: tg.title }, `prefetch:${tg.videoId}`).catch(() => {});
+    if (tg.scId) enqueueJob('music_prefetch', { scId: tg.scId, url: tg.url, title: tg.title }, `prefetch:sc:${tg.scId}`).catch(() => {});
+    else enqueueJob('music_prefetch', { videoId: tg.videoId, title: tg.title }, `prefetch:${tg.videoId}`).catch(() => {});
   }
   // DESIGN (2026-11-06, wahi duplicate-screen report): results bhi pehle SIRF
   // tappable list — poora text page sirf list fail hone par jayega. ('more'
@@ -389,6 +391,7 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
           // chalata hai; url sirf YT picks par (andar ki delivery chain ke liye —
           // failure par user ko YouTube link KABHI nahi jata, 2026-11-07 niyam).
           source: pick.source || 'yt', songId: pick.source === 'jiosaavn' ? pick.id : undefined,
+          scId: pick.source === 'soundcloud' ? pick.id : undefined,
           url: pick.source === 'jiosaavn' ? undefined : pick.url },
         `music:${msgId || `${user.id}:${pick.id}:${Date.now()}`}`);
       // SMART MUSIC MEMORY: pick history me likho (repeat detection ki neev).
