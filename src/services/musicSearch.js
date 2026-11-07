@@ -1,5 +1,13 @@
-import { searchSongsSaavn, foldText, queryOverlap } from './jiosaavn.js';
+import { searchSongsSaavn, foldText, queryOverlap, MAX_SONG_SEC } from './jiosaavn.js';
 import { searchSongs } from './music.js';
+
+/** Gaana delivery ke layak hai? Duration pata ho aur 10-min cap se lamba ho
+ *  to NAHI (1-ghante wale mix/playlist — WhatsApp par bheje hi nahi ja sakte).
+ *  Duration na pata ho to roko mat (galti se achha gaana na mare). */
+export function isSongLength(track) {
+  const d = Number(track?.durationSec || track?.duration) || 0;
+  return !d || d <= MAX_SONG_SEC;
+}
 
 // MERGED MUSIC SEARCH (2026-11-06 raat — Hero ki shikayat: "officially song
 // nahi de pa raha hai, AI song aur Bhojpuri la raha hai").
@@ -67,8 +75,11 @@ export async function searchMusicMerged(query, limit = 8) {
   const ytRaw = ytRes.status === 'fulfilled' ? ytRes.value || [] : [];
 
   const pool = [];
-  for (const t of saavn) pool.push({ track: t, score: Number(t._score) || 0 });
-  ytRaw.forEach((t, i) => pool.push({ track: t, score: scoreYtTrack(t, query, i, ytRaw.length) }));
+  // LAMBE MIX BAND (2026-11-07): 10-min cap se lambe natije pool me ghusne
+  // hi na do — Phonk jaisi category me 1-ghante wale playlist sabse upar
+  // baithe the, woh na download hote hain na WhatsApp par jate hain.
+  for (const t of saavn) if (isSongLength(t)) pool.push({ track: t, score: Number(t._score) || 0 });
+  ytRaw.forEach((t, i) => { if (isSongLength(t)) pool.push({ track: t, score: scoreYtTrack(t, query, i, ytRaw.length) }); });
   pool.sort((a, b) => b.score - a.score);
 
   const out = [];
@@ -87,7 +98,7 @@ export async function searchMusicMerged(query, limit = 8) {
     perSource[src]++;
     out.push(track);
   }
-  // Kuch na mile to jo mila wahi (khaali se behtar)
-  if (!out.length) return [...saavn, ...ytRaw].slice(0, limit);
+  // Kuch na mile to jo mila wahi (khaali se behtar) — par lambe mix yahan bhi nahi
+  if (!out.length) return [...saavn, ...ytRaw].filter(isSongLength).slice(0, limit);
   return out;
 }
