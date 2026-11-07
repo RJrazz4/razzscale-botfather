@@ -5,7 +5,7 @@ import { setFlow, getFlow, logUsage } from '../db/pool.js';
 import { spawnSubBot } from '../services/spawner.js';
 import { searchSongs } from '../services/music.js';
 import { searchSongsSaavn } from '../services/jiosaavn.js';
-import { searchMusicMerged, prefetchTargets } from '../services/musicSearch.js';
+import { searchMusicMerged, prefetchTargets, isSongLength } from '../services/musicSearch.js';
 import { findRepeat, recordPick, getRecent } from '../services/musicMemory.js';
 import { enqueueJob } from '../services/worker.js';
 import { vipMenuText, vipPitchText, VIP_FEATURES } from './vip.js';
@@ -392,6 +392,11 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
           // failure par user ko YouTube link KABHI nahi jata, 2026-11-07 niyam).
           source: pick.source || 'yt', songId: pick.source === 'jiosaavn' ? pick.id : undefined,
           scId: pick.source === 'soundcloud' ? pick.id : undefined,
+          // Rescue ke liye: isi list ke dusre YT uploads (usi gaane ke) —
+          // pehla upload fail ho to worker inhe ek-ek karke parkhega.
+          altIds: (results || [])
+            .filter((r) => r && r.id && r.id !== pick.id && r.source !== 'jiosaavn' && r.source !== 'soundcloud' && isSongLength(r))
+            .slice(0, 3).map((r) => r.id),
           url: pick.source === 'jiosaavn' ? undefined : pick.url },
         `music:${msgId || `${user.id}:${pick.id}:${Date.now()}`}`);
       // SMART MUSIC MEMORY: pick history me likho (repeat detection ki neev).
