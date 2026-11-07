@@ -5,8 +5,9 @@ import { env } from '../config/env.js';
 import * as evo from './transport.js';
 import * as graph from './graph-cloud.js';
 import * as telegram from './telegram.js';
-import { getAudioForVideo, searchSongs, noteDownloadFailure } from './music.js';
-import { getFreshUrl, withQuality } from './jiosaavn.js';
+import { getAudioForVideo, searchSongs, noteDownloadFailure, initYtdlp } from './music.js';
+import { getFreshUrl, withQuality, searchSongsSaavn } from './jiosaavn.js';
+import { isSongLength, pickSaavnRescue, pickAltUpload, rescueQueryFromTitle } from './musicSearch.js';
 import { markSent } from './musicMemory.js';
 import { startSeeder } from './librarySeeder.js';
 import { freeChat, workWrite } from './llm.js';
@@ -345,6 +346,54 @@ async function deliverYtTrackCloud(p) {
   await setWaMediaId(p.videoId, mediaId).catch(() => {});
 }
 
+// ---------- CROSS-SOURCE RESCUE (2026-11-07, Hero: "har music aana chahiye") ----------
+// Ek source fail ho to wahi gaana dusre source se: YT pick fail -> Saavn par
+// wahi gaana (pickSaavnRescue ke sakht mel par hi); Saavn fail -> YT.
+// Kamyab ho to p.rescuedSource/rescuedId me asal delivery likhi jati hai
+// (history ke liye). Na mile to throw — asal fail wala rasta hi aage chalega.
+// Rescue ke liye: koi YT video dono transport par bhejo — Cloud par media
+// upload wala rasta (deliverYtTrackCloud), Evolution par file/base64 wala.
+async function deliverYtAny(p, videoId, url) {
+  const p2 = { ...p, source: 'yt', videoId, url, songId: undefined };
+  if (p.instance === evo.CLOUD_INSTANCE) { await deliverYtTrackCloud(p2); return; }
+  const file = await getAudioForVideo(videoId, p.title);
+  await evo.sendPresence(p.instance, p.to, 'recording', 30000).catch(() => {});
+  const b64 = fs.readFileSync(file).toString('base64');
+  await evo.sendMedia(p.instance, p.to, b64, p.title, 'audio', { footer: true });
+}
+
+async function rescueDeliver(p) {
+  if (p.source === 'jiosaavn') {
+    const hits = await searchSongs(rescueQueryFromTitle(p.title) || p.title, 6).catch(() => []);
+    const hit = (hits || []).find((h) => h?.id && isSongLength(h));
+    if (!hit) throw new Error('rescue_no_yt_match');
+    await deliverYtAny(p, hit.id, hit.url);
+    // Bookkeeping: asal pick ke source/id p par hi rehne do; rescue ka
+    // source/id alag se rakho (history ke liye). p.videoId = undefined isliye
+    // taaki moveBusyState bina id-mel ke busy guard saaf kar de — rescue wala
+    // id flow ke busy id se mel hi nahi khayega aur user 30 min atka rahega.
+    p.rescuedSource = 'yt'; p.rescuedId = hit.id; p.videoId = undefined;
+    return;
+  }
+  // YT pick fail — pehle Saavn par wahi gaana (sakht mel par hi)
+  const hits = await searchSongsSaavn(rescueQueryFromTitle(p.title) || p.title, 6).catch(() => []);
+  const hit = pickSaavnRescue(p.title, hits);
+  if (hit) {
+    const p2 = { ...p, source: 'jiosaavn', songId: hit.id, videoId: undefined };
+    if (p.instance === evo.CLOUD_INSTANCE) await deliverSaavnTrackCloud(p2);
+    else await deliverSaavnTrack(p2);
+    p.rescuedSource = 'jiosaavn'; p.rescuedId = hit.id; p.videoId = undefined;
+    return;
+  }
+  // Aakhri rasta: wahi gaana, DUSRA YouTube upload — kharab upload par atke
+  // rehne se dusra upload aksar chal jata hai (alag video, alag haal).
+  const alts = await searchSongs(rescueQueryFromTitle(p.title) || p.title, 8).catch(() => []);
+  const alt = pickAltUpload(alts, p.videoId);
+  if (!alt) throw new Error('rescue_no_match');
+  await deliverYtAny(p, alt.id, alt.url);
+  p.rescuedSource = 'yt'; p.rescuedId = alt.id; p.videoId = undefined;
+}
+
 // Post-audio BUTTONS (Cloud) — Evolution par yahi kaam action LIST karti hai; Cloud par
 // 3 reply buttons: Lyrics / Naya gaana / Menu. Button ids masterMenu ke purane rowIds
 // hi hain — wahi branches (lyrics keyword / TAP_MAP music_new / menu keyword) chalenge.
@@ -396,11 +445,18 @@ const EXECUTORS = {
           try {
             await deliverSaavnTrackCloud(p);
           } catch (e) {
-            p.url = undefined; p.videoId = null; // failure text bina dead-link ke jaye
-            throw e;
+            // RESCUE: wahi gaana YT se lane ki koshish (rescueDeliver)
+            try { await rescueDeliver(p); }
+            catch { p.url = undefined; p.videoId = null; throw e; } // failure text bina dead-link ke jaye
           }
         } else {
-          await deliverYtTrackCloud(p);
+          try {
+            await deliverYtTrackCloud(p);
+          } catch (e) {
+            // RESCUE: wahi gaana Saavn se — kitne hi YT gaane Saavn par hain
+            try { await rescueDeliver(p); }
+            catch { throw e; }
+          }
         }
         await moveBusyState(p.userId, p.videoId, { step: 'music_done', lastTitle: p.title });
         // 4 options chahiye (Lyrics/Gaana chuno/Naya gaana/Menu) — WhatsApp
@@ -412,7 +468,7 @@ const EXECUTORS = {
           await evo.sendText(p.instance, p.to, "Lyrics chahiye to 'lyrics' likh do 🎵").catch(() => {});
         }
         if (p.userId) await logUsage(p.userId, 'music').catch(() => {});
-        if (p.userId) await markSent(p.userId, p.source, p.source === 'jiosaavn' ? p.songId : p.videoId).catch(() => {});
+        if (p.userId) await markSent(p.userId, p.rescuedSource || p.source, p.rescuedId || (p.source === 'jiosaavn' ? p.songId : p.videoId)).catch(() => {});
         return;
       }
       if (p.source === 'jiosaavn' && p.songId) {
@@ -420,17 +476,27 @@ const EXECUTORS = {
         try {
           await deliverSaavnTrack(p);
         } catch (e) {
-          // Payload saaf: saavn ID ko videoId ki jagah mat rehne do — tick()
-          // ka failure-rasta videoId se busy state milata hai, aur failure
-          // text ab link banata hi nahi (2026-11-07 ka niyam).
-          p.url = undefined; p.videoId = null;
-          throw e;
+          // RESCUE: wahi gaana YT se lane ki koshish (rescueDeliver)
+          try { await rescueDeliver(p); }
+          catch {
+            // Payload saaf: saavn ID ko videoId ki jagah mat rehne do — tick()
+            // ka failure-rasta videoId se busy state milata hai, aur failure
+            // text ab link banata hi nahi (2026-11-07 ka niyam).
+            p.url = undefined; p.videoId = null;
+            throw e;
+          }
         }
       } else {
-        const file = await getAudioForVideo(p.videoId, p.title);
-        await evo.sendPresence(p.instance, p.to, 'recording', 30000).catch(() => {});
-        const b64 = fs.readFileSync(file).toString('base64');
-        await evo.sendMedia(p.instance, p.to, b64, p.title, 'audio', { footer: true });
+        try {
+          const file = await getAudioForVideo(p.videoId, p.title);
+          await evo.sendPresence(p.instance, p.to, 'recording', 30000).catch(() => {});
+          const b64 = fs.readFileSync(file).toString('base64');
+          await evo.sendMedia(p.instance, p.to, b64, p.title, 'audio', { footer: true });
+        } catch (e) {
+          // RESCUE: wahi gaana Saavn se lane ki koshish (rescueDeliver)
+          try { await rescueDeliver(p); }
+          catch { throw e; }
+        }
       }
       // Delivery ho gayi — busy guard hatao, ab post-audio taps (lyrics/music_new) khulenge
       await moveBusyState(p.userId, p.videoId, { step: 'music_done', lastTitle: p.title });
@@ -439,7 +505,7 @@ const EXECUTORS = {
         await evo.sendText(p.instance, p.to, "Lyrics chahiye to 'lyrics' likh do 🎵").catch(() => {});
       }
       if (p.userId) await logUsage(p.userId, 'music').catch(() => {});
-      if (p.userId) await markSent(p.userId, p.source, p.source === 'jiosaavn' ? p.songId : p.videoId).catch(() => {});
+      if (p.userId) await markSent(p.userId, p.rescuedSource || p.source, p.rescuedId || (p.source === 'jiosaavn' ? p.songId : p.videoId)).catch(() => {});
     } finally {
       await evo.sendPresence(p.instance, p.to, 'paused', 1000).catch(() => {});
     }
@@ -625,6 +691,7 @@ export function startWorker() {
   // Boot par atke hue 'running' jobs ko wapas pending karo (crash/restart recovery)
   pool.query("update jobs set status='pending' where status='running'").catch(() => {});
   timer = setInterval(() => { tick().catch(() => {}); }, 1500);
+  initYtdlp(); // Khud-taaza yt-dlp boot par hi taiyaar karna shuru (music.js)
   startSeeder(); // Auto Library (2026-11-07) — apni dheere gati se, user jobs hamesha pehle
   console.log('[worker] jobs worker shuru');
 }
