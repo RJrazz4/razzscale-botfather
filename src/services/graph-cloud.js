@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import { env } from '../config/env.js';
 
 // WhatsApp Cloud API (Official) OUTBOUND client — graph.facebook.com par seedha fetch.
@@ -179,6 +180,13 @@ export function buildAudioLinkPayload(to, url) {
   };
 }
 
+export function buildAudioIdPayload(to, mediaId) {
+  return {
+    messaging_product: 'whatsapp', recipient_type: 'individual',
+    to: String(to), type: 'audio', audio: { id: String(mediaId) },
+  };
+}
+
 // Read receipt (+ optional typing indicator — jawab banne tak "typing…" dikhta hai).
 export function buildReadPayload(messageId, typing = false) {
   const p = { messaging_product: 'whatsapp', status: 'read', message_id: String(messageId) };
@@ -247,5 +255,33 @@ export async function sendButtons(to, opts) {
   return postGraph(p);
 }
 export const sendAudioByLink = (to, url) => postGraph(buildAudioLinkPayload(to, url));
+export const sendAudioById = (to, mediaId) => postGraph(buildAudioIdPayload(to, mediaId));
+
+// Media UPLOAD (multipart) — /messages se alag endpoint (/{phone-id}/media).
+// Download ki hui audio file ko WhatsApp par bhejne ka asal rasta yahi hai:
+// pehle upload -> media_id, phir sendAudioById. Fail par null, throw kabhi
+// nahi; token log nahi hota (error line sirf Meta ke jawab se banti hai).
+export async function uploadMediaFile(filePath, mime, filename) {
+  if (!graphConfigured()) {
+    console.error('[graph-cloud] upload skipped reason=not_configured (WHATSAPP_CLOUD_TOKEN / WHATSAPP_PHONE_NUMBER_ID missing)');
+    return null;
+  }
+  try {
+    const buf = fs.readFileSync(filePath);
+    const form = new FormData();
+    form.append('messaging_product', 'whatsapp');
+    form.append('type', mime);
+    form.append('file', new Blob([buf], { type: mime }), filename || 'audio.m4a');
+    const res = await fetch(`https://graph.facebook.com/${GRAPH_VERSION}/${env.whatsappPhoneNumberId}/media`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${env.whatsappCloudToken}` },
+      body: form,
+    });
+    const raw = await res.text().catch(() => '');
+    if (!res.ok) { console.error(graphErrorLogLine({ type: 'media_upload' }, res.status, raw)); return null; }
+    const id = JSON.parse(raw)?.id;
+    return id ? String(id) : null;
+  } catch (e) { console.error(graphErrorLogLine({ type: 'media_upload' }, 0, null, e)); return null; }
+}
 export const markRead = (messageId, typing = false) =>
   (messageId ? postGraph(buildReadPayload(messageId, typing)) : Promise.resolve(false));
