@@ -139,7 +139,7 @@ export async function recordPick({ userId, waId, pick, query }) {
        last_requested_at = excluded.last_requested_at,
        request_count = listening_history.request_count + 1,
        status = 'selected',
-       last_query = excluded.last_query,
+       last_query = coalesce(excluded.last_query, listening_history.last_query),
        title = excluded.title,
        artist = excluded.artist,
        normalized_title = excluded.normalized_title,
@@ -149,6 +149,16 @@ export async function recordPick({ userId, waId, pick, query }) {
     [crypto.randomUUID(), userId, waId || null, provider, String(pick.id),
      pick.title || songTitle, normalizeText(songTitle), artist || null, normalizeText(artist),
      pick.durationSec || pick.duration || null, pick.url || null, now, now, query || null]);
+}
+
+/** Recently Played: user ke sabse taze gaane, aakhri baar mange hue ke kram me. */
+export async function getRecent(userId, limit = 8) {
+  if (!userId) return [];
+  await ensureMusicHistory();
+  const { rows } = await pool.query(
+    'select * from listening_history where user_id=$1 order by last_requested_at desc limit $2',
+    [userId, limit]);
+  return rows;
 }
 
 /** Worker ki safal delivery ke baad status 'sent' karo. Sunne ki pushti isse NAHI banti. */
