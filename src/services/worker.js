@@ -104,6 +104,7 @@ async function sendMusicActionList(instance, to, ok) {
       { rowId: 'menu', title: '🏠 Menu par wapas', description: 'Saari services dekho' },
     ]
     : [
+      { rowId: 'music_list', title: '🎵 Gaana chuno', description: 'Wahi list se dusra gaana chuno' },
       { rowId: 'music_new', title: '🔍 Naya gaana khojo', description: 'Koi aur gaana try karo' },
       { rowId: 'menu', title: '🏠 Menu par wapas', description: 'Saari services dekho' },
     ];
@@ -280,6 +281,7 @@ async function sendMusicActionButtons(to, ok) {
       { id: 'menu', title: '🏠 Menu' },
     ]
     : [
+      { id: 'music_list', title: '🎵 Gaana chuno' },
       { id: 'music_new', title: '🔍 Naya gaana' },
       { id: 'menu', title: '🏠 Menu' },
     ];
@@ -305,8 +307,9 @@ const EXECUTORS = {
     try {
       if (p.instance === evo.CLOUD_INSTANCE) {
         // CLOUD branch: file/vault wala rasta nahi — saavn gaana LINK se, uske baad
-        // action BUTTONS. YT-source pick ka audio link Cloud par nahi banta, isliye
-        // woh fail hokar sendMusicFailure ke YouTube-link wale text par jata hai.
+        // action LIST. YT-source pick ka audio Cloud par nahi banta, isliye
+        // woh fail hokar sendMusicFailure par jata hai (link wahan bhi NAHI
+        // jata — 2026-11-07 ka pakka niyam).
         if (p.source === 'jiosaavn' && p.songId) {
           try {
             await deliverSaavnTrackCloud(p);
@@ -335,8 +338,9 @@ const EXECUTORS = {
         try {
           await deliverSaavnTrack(p);
         } catch (e) {
-          // Failure-text ke liye payload saaf: saavn ID se YouTube link banana DEAD
-          // link hoga — tick wala sendMusicFailure phir bina-link wala text chunega.
+          // Payload saaf: saavn ID ko videoId ki jagah mat rehne do — tick()
+          // ka failure-rasta videoId se busy state milata hai, aur failure
+          // text ab link banata hi nahi (2026-11-07 ka niyam).
           p.url = undefined; p.videoId = null;
           throw e;
         }
@@ -469,14 +473,14 @@ async function notifyOwnerForApproval(p, workText) {
 const FAILURE_TEXT = {
   lyrics: { type: 'text', text: 'Is gaane ke lyrics nahi mile 😔' },
 };
-// Music fail (FRONTEND BRIEF §3): sirf "fail ho gaya" nahi — usi track ka YouTube link
-// (alternative sunne ka rasta) + action list. Link videoId se banta hai (pick ke time
-// payload me videoId hamesha hota hai; url bhi bheja jata hai, woh mile to wahi use karo).
+// Music fail: YOUTUBE LINK KABHI NAHI (Hero, 2026-11-07 — pakka niyam).
+// User yahan WhatsApp me audio sunne aaya hai; use YouTube par bhejna
+// matlab apna kaam hi khatm kar dena. Fail par imaandaar text + bot ke
+// ANDAR ke raste: wahi list se dusra gaana (music_list), naya search, menu.
+// (Results flow me rehte hain — tick() failure par moveBusyState unhe
+// music_zone tak carry karta hai, isliye music_list yahan kaam karta hai.)
 async function sendMusicFailure(p) {
-  const link = p.url || (p.videoId ? `https://www.youtube.com/watch?v=${p.videoId}` : null);
-  const text = link
-    ? `Ye gaana download nahi ho paya 😔\nTab tak YouTube par sun lo: ${link}`
-    : 'Ye gaana download nahi ho paya 😔 — koi aur gaana try karo.';
+  const text = 'Ye gaana nahi aa paya 😔 — wahi list se koi aur gaana chuno, ya naya gaana search karo.';
   await evo.sendText(p.instance, p.to, text).catch(() => {});
   if (p.instance === evo.CLOUD_INSTANCE) { await sendMusicActionButtons(p.to, false); return; }
   await sendMusicActionList(p.instance, p.to, false);
