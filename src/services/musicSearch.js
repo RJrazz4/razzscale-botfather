@@ -82,7 +82,7 @@ export function scoreScTrack(track, query) {
   return s;
 }
 
-export async function searchMusicMerged(query, limit = 8) {
+export async function searchMusicMerged(query, limit = 8, opts = {}) {
   const [saavnRes, ytRes, scRes] = await Promise.allSettled([
     searchSongsSaavn(query, 8),
     searchSongs(query, 8),
@@ -115,6 +115,20 @@ export async function searchMusicMerged(query, limit = 8) {
     pool.push({ track: t, score: s });
   });
   for (const t of scRaw) if (isSongLength(t)) pool.push({ track: t, score: scoreScTrack(t, query) });
+  // STRICT GATE (2026-11-07 raat, typed search par hi): gaane ke naam se
+  // ZERO mel wala track chahe kitna bhi mashhoor ho (plays/views), woh IS
+  // khoj ka gaana nahi hai — "Officially Mujhe teri jarurat hai" par Ek
+  // Villain ke dusre hit (Humdard/Galliyan) upar baith gaye the kyunki unke
+  // plays zyada the. Category browsing par ye gate NAHI (wahan naam hota hi
+  // nahi, mahaul hota hai).
+  if (opts.strict) {
+    for (const e of pool) {
+      const txt = e.track.source === 'jiosaavn' ? (e.track.song || e.track.title || '')
+        : e.track.source === 'soundcloud' ? `${e.track.title || ''} ${e.track.channel || ''}`
+        : (e.track.title || '');
+      if (queryOverlap(query, txt) === 0) e.score -= 6;
+    }
+  }
   pool.sort((a, b) => b.score - a.score);
 
   const out = [];
