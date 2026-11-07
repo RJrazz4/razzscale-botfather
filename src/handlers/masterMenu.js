@@ -27,26 +27,20 @@ const MENU_TEXT = `╭━━━ ❖ ━━━╮
    🤖 *RAZZSCALE AI BOTFATHER*
 ╰━━━ ❖ ━━━╯
 
-Namaste! 🙏 Gaane sunna, AI se baat, business automation — sab yahin, *bilkul FREE* shuruaat ke saath!
+Namaste! 🙏
 
-👇 *Number likho ya list se tap karo:*
+🎵 *Gaane ka naam likho — gaana yahin milega!*
+Bas naam bhej do, menu ghumane ki zaroorat nahi.
 
-1️⃣ *Music Zone* 🎵
-      Category chuno ya gaane ka naam bhejo
+👇 *Ya number likho / list se tap karo:*
 
-2️⃣ *Free AI Chat* 💬
-      Mujhse kuch bhi pucho, jawab milega
+1️⃣ *Music Zone* 🎵 — Category ya search
+2️⃣ *Free AI Chat* 💬 — Kuch bhi pucho
+3️⃣ *VIP Automation* 🚀 — Business ke liye khaas
+4️⃣ *Apna Bot Banao* 🤖 — FREE me shuru
+5️⃣ *Kaam Karwao* ✍️ — Likhai wala kaam
 
-3️⃣ *VIP Action Automation* 🚀
-      Business ke liye guided consultation
-
-4️⃣ *Create Your Own Bot* 🤖
-      Apna khud ka WhatsApp bot banao — FREE
-
-5️⃣ *Kaam Karwao* ✍️
-      Likhai wala kaam — caption, message, script
-
-🎨 Image banana ho to *image* likho.
+🎨 Image ke liye *image* likho.
 ━━━━━━━━━━━━━━━
 📞 *Insaan se baat karni ho* to yahin likho — Boss khud jawab denge.`;
 
@@ -60,15 +54,29 @@ export function homeRows() {
     { rowId: 'work', title: '✍️ Kaam Karwao', description: 'Likhai wala kaam — caption, message, script' },
   ];
 }
-async function sendHomeMenu(inst, from) {
+async function sendHomeMenu(inst, from, userId) {
+  // ADAPTIVE CHEHRA (2026-11-07 raat, Hero ka 4D order): purana user (2+ gaane
+  // asal me bheje ja chuke) ko guided menu nahi — pehchan wala chhota chehra,
+  // Recently Played SABSE UPAR. Naya user = guided menu (use sikhana hai).
+  // History read fail ho to normal menu hi jayega.
+  let returning = false;
+  if (userId) {
+    try {
+      const hist = await getRecent(userId, 8);
+      returning = hist.filter((r) => r.status === 'sent').length >= 2;
+    } catch { returning = false; }
+  }
+  const rows = returning
+    ? [{ rowId: 'music_recent', title: '🕘 Recently Played', description: 'Tumhare pichhle gaane — tap karke phir suno' }, ...homeRows()]
+    : homeRows();
   // List primary (footer ON — menu = footer rule ki jagah); fail ho to text menu fallback (footer ON).
-  // Cloud par listBody chhota prompt hai — poora MENU_TEXT interactive body me NAHI
-  // jata (transport wala niyam); Evolution par description hi body banta hai, barkarar.
   await evo.sendList(inst, from, {
     title: '🤖 RazzScale AI BotFather', buttonText: 'Menu Dekho',
     description: MENU_TEXT, footer: true,
-    listBody: 'Namaste! 🙏 Gaane sunna, AI se baat, business automation — sab yahin, bilkul FREE!\n\nKya karna hai? Neeche wala button dabao aur tap karo 👇',
-    sections: [{ title: '🤖 RazzScale Services', rows: homeRows() }],
+    listBody: returning
+      ? 'Wapas aa gaye! 🙏\n\n🎵 *Gaane ka naam likho — gaana yahin milega!*\nYa apne pichhle gaane ek tap me suno 👇'
+      : 'Namaste! 🙏\n\n🎵 *Gaane ka naam likho — gaana yahin milega!*\nYa neeche button se menu kholo 👇',
+    sections: [{ title: '🤖 RazzScale Services', rows }],
   }).catch(async () => {
     console.error('[masterMenu] home list failed → text menu fallback');
     await evo.sendText(inst, from, MENU_TEXT, { footer: true }).catch(() => {});
@@ -283,14 +291,14 @@ async function handleBack(ctx) {
   const goZone = async () => { await setFlow(user.id, 'master', { step: 'music_zone', lastTitle: flow?.lastTitle }, FLOW_TTL); await sendMusicZone(inst, from); };
   if (CONSULT_BACK[state]) {
     const prev = CONSULT_BACK[state];
-    if (prev === 'menu') { await setFlow(user.id, 'master', { step: 'menu' }); await sendHomeMenu(inst, from); return true; }
+    if (prev === 'menu') { await setFlow(user.id, 'master', { step: 'menu' }); await sendHomeMenu(inst, from, user.id); return true; }
     await setFlow(user.id, 'master', { step: prev, answers: flow?.answers || {} }, FLOW_TTL);
     await resendConsultScreen({ ...ctx, state: prev });
     return true;
   }
   if (WORK_BACK[state]) {
     const prev = WORK_BACK[state];
-    if (prev === 'menu') { await setFlow(user.id, 'master', { step: 'menu' }); await sendHomeMenu(inst, from); return true; }
+    if (prev === 'menu') { await setFlow(user.id, 'master', { step: 'menu' }); await sendHomeMenu(inst, from, user.id); return true; }
     await setFlow(user.id, 'master', { step: prev, work: flow?.work || {} }, FLOW_TTL);
     await resendWorkScreen({ ...ctx, state: prev });
     return true;
@@ -299,7 +307,7 @@ async function handleBack(ctx) {
     case 'music_zone': case 'music_done': case 'music_busy': case 'ai_chat':
     case 'spawn_type': case 'vip_pick':
       await setFlow(user.id, 'master', { step: 'menu' });
-      await sendHomeMenu(inst, from);
+      await sendHomeMenu(inst, from, user.id);
       return true;
     case 'music_query':
       await goZone();
@@ -321,7 +329,7 @@ async function handleBack(ctx) {
       return true;
     default:
       await setFlow(user.id, 'master', { step: 'menu' });
-      await sendHomeMenu(inst, from);
+      await sendHomeMenu(inst, from, user.id);
       return true;
   }
 }
@@ -335,7 +343,7 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
   const flow = await getFlow(user.id, 'master');
   const state = flow?.step || 'menu';
   const lower = t.toLowerCase();
-  const ctx = { user, from, text, t, lower, flow, state, inst, msgId, goHome: () => sendHomeMenu(inst, from) };
+  const ctx = { user, from, text, t, lower, flow, state, inst, msgId, goHome: () => sendHomeMenu(inst, from, user.id) };
 
   // ===== Owner (Boss) work approval — SABSE PEHLE, kisi bhi state se upar =====
   // (Sirf owner number par chalta hai; customer ke liye hamesha false.)
@@ -344,7 +352,7 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
   // ===== Global nav — state dispatch se PEHLE (Back/Main Menu har jagah consistent) =====
   if (t === 'nav_menu' || lower === 'main menu') {
     await setFlow(user.id, 'master', { step: 'menu' });
-    await sendHomeMenu(inst, from);
+    await sendHomeMenu(inst, from, user.id);
     return;
   }
   if (t === 'nav_back') { await handleBack(ctx); return; }
@@ -354,7 +362,7 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
   // fail par 'music_zone' par le jata hai (worker.js moveBusyState) — is beech doosra
   // pick/job nahi banta, sirf intezaar wala jawab jata hai. Nav/menu hamesha khula hai.
   if (state === 'music_busy') {
-    if (lower === 'menu') { await setFlow(user.id, 'master', { step: 'menu' }); await sendHomeMenu(inst, from); return; }
+    if (lower === 'menu') { await setFlow(user.id, 'master', { step: 'menu' }); await sendHomeMenu(inst, from, user.id); return; }
     await evo.sendText(inst, from, '⏳ Gaana aa raha hai… download ho raha hai, bas thoda sa sabr karo 🎧\nRukna ho to "menu" likh do.');
     return;
   }
@@ -440,6 +448,14 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
       await setFlow(user.id, 'master', { step: 'music_query', lastTitle: flow?.lastTitle }, FLOW_TTL);
       await evo.sendText(inst, from, 'Purani list ab nahi mili — gaane ka naam likho, phir se dhoondh deta hoon 🎵');
     }
+    return;
+  }
+
+  // ===== RECENTLY PLAYED — global route (2026-11-07 raat) =====
+  // Home ke adaptive chehre me Recently Played sabse upar hai — uska tap
+  // menu/ai_chat state se bhi yahin aayega (music_zone ka apna rasta neeche hai).
+  if (t === 'music_recent' && ['menu', 'music_done', 'ai_chat'].includes(state)) {
+    await sendRecentList(ctx);
     return;
   }
 
@@ -537,7 +553,7 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
   // ===== Menu / greeting (state yahan hamesha 'menu' par reset — Main Menu har jagah consistent) =====
   if (['hi', 'hii', 'hello', 'hey', 'menu', 'start', 'namaste'].includes(lower) || t === '') {
     await setFlow(user.id, 'master', { step: 'menu' });
-    await sendHomeMenu(inst, from);
+    await sendHomeMenu(inst, from, user.id);
     return;
   }
 
@@ -640,5 +656,5 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
 
   // ===== Default: home menu (dead end kabhi nahi) =====
   await setFlow(user.id, 'master', { step: 'menu' });
-  await sendHomeMenu(inst, from);
+  await sendHomeMenu(inst, from, user.id);
 }
