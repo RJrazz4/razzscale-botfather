@@ -132,11 +132,17 @@ function musicListRows(results, shown) {
   const page = Math.min(shown, MUSIC_PAGE);
   const rows = results.slice(0, page).map((r, i) => {
     const dur = r.duration ? `${Math.floor(r.duration / 60)}:${String(r.duration % 60).padStart(2, '0')}` : '';
+    // Channel bhi description me (2026-11-07 raat): title 24-char clamp me
+    // clickbait aur official ek jaise dikhte the — user ko T-Series jaisa
+    // channel naam dikhe to galat upload khud pehchan lega.
+    const descParts = [r.title || 'Gaana'];
+    if (r.source === 'yt' && r.channel) descParts.push(r.channel);
+    if (dur) descParts.push(dur);
     return {
       rowId: String(i + 1), // global index — sessionRouter list-reply ko isi se pick banata hai
       // WhatsApp list limit: row title ≤24 chars — poora title description (≤72) me rehta hai
       title: clampListTitle(r.title || 'Gaana'),
-      description: dur ? `${r.title || 'Gaana'} • ${dur}` : (r.title || undefined),
+      description: descParts.join(' • ').slice(0, 72),
     };
   });
   if (results.length > page) rows.push({ rowId: 'more', title: '➕ More tracks', description: 'Aur results dekho' });
@@ -368,7 +374,11 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
   }
 
   // ===== Music selection state — download+send WORKER ke paas (V2.1) =====
-  if (state === 'music_pick') {
+  // music_done bhi (2026-11-07 raat, Hero ki live report): gaana bajne ke baad
+  // worker results ko music_done me carry karta hai — purani Top Results list
+  // ka number-tap WAHIN pick hai. Pehle ye tap home-menu ke number samjhe jate
+  // the ('2' = AI Chat khul jata tha!) — ab list ka number = list ka gaana.
+  if (state === 'music_pick' || state === 'music_done') {
     const results = flow.results || [];
     const shown = flow.shown || Math.min(MUSIC_PAGE, results.length);
     if (['more', 'aur'].includes(lower)) {
