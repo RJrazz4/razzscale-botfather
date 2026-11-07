@@ -1,5 +1,5 @@
 import { searchSongsSaavn, foldText, queryOverlap, MAX_SONG_SEC } from './jiosaavn.js';
-import { searchSongs, deadVideoIds } from './music.js';
+import { searchSongs, deadVideoIds, searchSongsSc } from './music.js';
 
 /** Gaana delivery ke layak hai? Duration pata ho aur 10-min cap se lamba ho
  *  to NAHI (1-ghante wale mix/playlist — WhatsApp par bheje hi nahi ja sakte).
@@ -66,13 +66,25 @@ function songCoreOf(track) {
   return '';
 }
 
+/** SoundCloud score: khoj-mel sabse bada, phir plays ki halki taakat.
+ *  SC ka kaam Phonk/remix wali jagah bharna hai — jahan YT/Saavn kamzor
+ *  hote hain wahan ye khud upar aa jayega; jahan woh mazboot hain wahan
+ *  peeche rahega. Pure. */
+export function scoreScTrack(track, query) {
+  let s = queryOverlap(query, `${track.title || ''} ${track.channel || ''}`) * 4;
+  s += Math.min(1.5, Math.log10((track.viewCount || 0) + 1) * 0.25);
+  return s;
+}
+
 export async function searchMusicMerged(query, limit = 8) {
-  const [saavnRes, ytRes] = await Promise.allSettled([
+  const [saavnRes, ytRes, scRes] = await Promise.allSettled([
     searchSongsSaavn(query, 8),
     searchSongs(query, 8),
+    searchSongsSc(query, 8),
   ]);
   const saavn = saavnRes.status === 'fulfilled' ? saavnRes.value || [] : [];
   const ytRaw = ytRes.status === 'fulfilled' ? ytRes.value || [] : [];
+  const scRaw = scRes.status === 'fulfilled' ? scRes.value || [] : [];
 
   const pool = [];
   // LAMBE MIX BAND (2026-11-07): 10-min cap se lambe natije pool me ghusne
@@ -80,15 +92,17 @@ export async function searchMusicMerged(query, limit = 8) {
   // baithe the, woh na download hote hain na WhatsApp par jate hain.
   for (const t of saavn) if (isSongLength(t)) pool.push({ track: t, score: Number(t._score) || 0 });
   ytRaw.forEach((t, i) => { if (isSongLength(t)) pool.push({ track: t, score: scoreYtTrack(t, query, i, ytRaw.length) }); });
+  for (const t of scRaw) if (isSongLength(t)) pool.push({ track: t, score: scoreScTrack(t, query) });
   pool.sort((a, b) => b.score - a.score);
 
   const out = [];
-  const perSource = { jiosaavn: 0, yt: 0 };
+  const perSource = { jiosaavn: 0, yt: 0, soundcloud: 0 };
+  const CAPS = { jiosaavn: 6, yt: 6, soundcloud: 3 };
   const seenCore = new Set();
   for (const { track, score } of pool) {
     if (out.length >= limit) break;
-    const src = track.source === 'jiosaavn' ? 'jiosaavn' : 'yt';
-    if (perSource[src] >= 6) continue;
+    const src = track.source === 'jiosaavn' ? 'jiosaavn' : (track.source === 'soundcloud' ? 'soundcloud' : 'yt');
+    if (perSource[src] >= CAPS[src]) continue;
     const core = songCoreOf(track);
     if (core) {
       if (seenCore.has(core)) continue;
@@ -99,7 +113,7 @@ export async function searchMusicMerged(query, limit = 8) {
     out.push(track);
   }
   // Kuch na mile to jo mila wahi (khaali se behtar) — par lambe mix yahan bhi nahi
-  let final = out.length ? out : [...saavn, ...ytRaw].filter(isSongLength).slice(0, limit);
+  let final = out.length ? out : [...saavn, ...ytRaw, ...scRaw].filter(isSongLength).slice(0, limit);
   // DEAD FILTER (2026-11-07): jo YT video baar-baar download fail ho chuka
   // hai, use list me dikhao hi mat — "list me hai par bajta nahi" wali
   // shikayat ki jad yahi thi. Nishan music.js ke music_dead me rehta hai;
@@ -114,15 +128,21 @@ export async function searchMusicMerged(query, limit = 8) {
   return final;
 }
 
-/** List ke YT gaane jinhe list bante hi peeche se download (prefetch) karna
+/** List ke gaane jinhe list bante hi peeche se download (prefetch) karna
  *  hai — dikhaye gaye page se, kram barkarar, zyada se zyada `limit`.
+ *  YouTube -> {videoId}, SoundCloud -> {scId, url}.
  *  Saavn picks link se jate hain, unhe prefetch ki zaroorat nahi. Pure. */
 export function prefetchTargets(results, limit = 3) {
   const out = [];
   for (const r of results || []) {
     if (out.length >= limit) break;
-    if (!r || r.source === 'jiosaavn' || !r.id) continue;
+    if (!r || !r.id) continue;
     if (r.duration && r.duration > MAX_SONG_SEC) continue;
+    if (r.source === 'jiosaavn') continue;
+    if (r.source === 'soundcloud') {
+      if (r.url) out.push({ scId: r.id, url: r.url, title: r.title || '' });
+      continue;
+    }
     out.push({ videoId: r.id, title: r.title || '' });
   }
   return out;
