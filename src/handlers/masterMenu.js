@@ -220,9 +220,19 @@ async function deliverRepeat(ctx, hit, query) {
   recordPick({ userId: user.id, waId: from, pick: { id: hit.provider_id, source: hit.provider, title: hit.title, artist: hit.artist || '', durationSec: hit.duration_sec, url: hit.ref_url }, query }).catch(() => {});
 }
 
+// QUERY SAFAAI (2026-11-07 raat): typed search ke faltu shabd (official,
+// full, hd...) gaane ke naam ka hissa nahi hote — ye khoj ko bigaad dete
+// hain ("Officially Mujhe teri jarurat hai" par Saavn/YT bhatak gaye the).
+const SEARCH_FILLER = new Set(['official', 'officially', 'full', 'hd', '4k', 'video', 'audio', 'mp3', 'download', 'lyrical']);
+function cleanSearchQuery(q) {
+  const kept = String(q || '').split(/\s+/).filter((x) => x && !SEARCH_FILLER.has(x.toLowerCase()));
+  return kept.length ? kept.join(' ') : q;
+}
+
 // Category/typed search ka common pipeline: ack -> search -> pick state ya empty state
 async function runMusicSearch(ctx, query, fromKind) {
   const { user, from, inst, flow } = ctx;
+  if (fromKind === 'search') query = cleanSearchQuery(query);
   // SMART MUSIC MEMORY: typed search par pehle is user ki apni history —
   // pakka repeat mile to search chalaye bina wahi recording. Category
   // browsing (generic query) par ye check NAHI lagta. Memory fail ho to
@@ -240,7 +250,7 @@ async function runMusicSearch(ctx, query, fromKind) {
   // the — isliye dono source parallel, ek hi tarazu par naap kar (musicSearch).
   // Merged fail ho to purani chain (Saavn -> YT) backup hai.
   let results = [];
-  try { results = await searchMusicMerged(query, 8); } catch { results = []; }
+  try { results = await searchMusicMerged(query, 8, { strict: fromKind === 'search' }); } catch { results = []; }
   if (!results.length) {
     try { results = await searchSongsSaavn(query, 8); } catch { results = []; }
     if (!results.length) { try { results = await searchSongs(query, 8); } catch { results = []; } }
