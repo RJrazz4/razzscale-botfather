@@ -117,6 +117,16 @@ export async function findRepeat(userId, query) {
     // Villain"), jo title/artist me hota hi nahi.
     if (row.last_query) hay.push(...normalizeText(row.last_query).split(' ').filter(Boolean));
     if (dWords.every((dw) => hay.some((ht) => tokenMatch(dw, ht)))) {
+      // EXACT DAAWA (2026-11-07 raat, live bhajan-galti ke baad): upar wala mel
+      // ek-tarfa hai (khoj ke shabd title me) — isiliye "Maa Mujhe Teri
+      // Zaroorat Hai" (bhajan, asal me bheja hua) bhi "Mujhe Teri Jarurat
+      // Hai" (film gaana) par hit ho gaya. Auto-delivery sirf tab jab gaane
+      // ke SAARE khaas shabd (artist wale shabd chhod kar) user ki khoj me
+      // hon. Exact na ho to hit nahi — aam khoj list dikhayegi, user chune.
+      const titleD = [...new Set(distinctiveWords(row.normalized_title || '').map((w) => looseFold(w)))];
+      const artistD = new Set((row.norm_artist || '').split(' ').filter(Boolean));
+      const allowed = (tw) => artistD.has(tw) || dWords.some((qw) => tokenMatch(qw, tw));
+      if (!titleD.length || !titleD.every(allowed)) continue;
       console.log(`[music-memory] repeat hit user=${userId} track=${row.provider}:${row.provider_id} lookup_ms=${Date.now() - started}`);
       return row;
     }
