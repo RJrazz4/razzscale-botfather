@@ -124,6 +124,15 @@ export async function findRepeat(userId, query) {
   return null;
 }
 
+// Monotonic ISO time: ek hi millisecond me kai recordPick ho jayein to bhi
+// har stamp pichhle se bada — warna Recently Played ka kram (last_requested_at
+// desc) ek-si timestamps par taash ke patto ki tarah bikhar jata hai.
+let lastStampMs = 0;
+function isoNow() {
+  lastStampMs = Math.max(Date.now(), lastStampMs + 1);
+  return new Date(lastStampMs).toISOString();
+}
+
 /** Pick (ya repeat delivery) ko history me likho — ek user+track = ek row, ginati badhti hai. */
 export async function recordPick({ userId, waId, pick, query }) {
   if (!userId || !pick?.id) return;
@@ -131,7 +140,7 @@ export async function recordPick({ userId, waId, pick, query }) {
   const provider = pick.source === 'jiosaavn' ? 'jiosaavn' : 'yt';
   const songTitle = provider === 'jiosaavn' ? (pick.song || pick.title || '') : (pick.title || '');
   const artist = provider === 'jiosaavn' ? (pick.artist || '') : (pick.channel || '');
-  const now = new Date().toISOString();
+  const now = isoNow();
   await pool.query(
     `insert into listening_history (id, user_id, wa_id, provider, provider_id, title, normalized_title, artist, norm_artist, duration_sec, ref_url, first_requested_at, last_requested_at, request_count, status, last_query)
      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,1,'selected',$14)
@@ -156,7 +165,7 @@ export async function getRecent(userId, limit = 8) {
   if (!userId) return [];
   await ensureMusicHistory();
   const { rows } = await pool.query(
-    'select * from listening_history where user_id=$1 order by last_requested_at desc limit $2',
+    'select * from listening_history where user_id=$1 order by last_requested_at desc, first_requested_at desc limit $2',
     [userId, limit]);
   return rows;
 }
