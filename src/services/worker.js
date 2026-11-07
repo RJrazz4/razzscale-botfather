@@ -5,7 +5,7 @@ import { env } from '../config/env.js';
 import * as evo from './transport.js';
 import * as graph from './graph-cloud.js';
 import * as telegram from './telegram.js';
-import { getAudioForVideo, searchSongs, noteDownloadFailure, initYtdlp } from './music.js';
+import { getAudioForVideo, searchSongs, noteDownloadFailure, initYtdlp, getAudioForScTrack } from './music.js';
 import { getFreshUrl, withQuality, searchSongsSaavn } from './jiosaavn.js';
 import { isSongLength, pickSaavnRescue, pickAltUpload, rescueQueryFromTitle } from './musicSearch.js';
 import { markSent } from './musicMemory.js';
@@ -346,6 +346,29 @@ async function deliverYtTrackCloud(p) {
   await setWaMediaId(p.videoId, mediaId).catch(() => {});
 }
 
+// ---------- CLOUD par SoundCloud gaane ki delivery (2026-11-07) ----------
+// YT wali hi kataar (media_id cache -> file -> Meta upload -> send), par
+// chaabi 'sc:<id>' namespace me aur file getAudioForScTrack se aati hai.
+async function deliverScTrackCloud(p) {
+  const scId = p.scId || p.videoId;
+  const cacheKey = `sc:${scId}`;
+  const cached = await getWaMediaId(cacheKey).catch(() => null);
+  if (cached) {
+    const sent = await graph.sendAudioById(p.to, cached).catch(() => false);
+    if (sent) return;
+    await clearWaMediaId(cacheKey).catch(() => {});
+  }
+  const file = await getAudioForScTrack(scId, p.url, p.title);
+  let size = 0;
+  try { size = fs.statSync(file).size; } catch { throw new Error('sc_cloud_file_missing'); }
+  if (!size || size > WHATSAPP_MAX) throw new Error('sc_cloud_too_large');
+  const mediaId = await graph.uploadMediaFile(file, audioMimeFor(file), path.basename(file));
+  if (!mediaId) throw new Error('sc_cloud_upload_failed');
+  const sent = await graph.sendAudioById(p.to, mediaId);
+  if (!sent) throw new Error('sc_cloud_send_failed');
+  await setWaMediaId(cacheKey, mediaId).catch(() => {});
+}
+
 // ---------- CROSS-SOURCE RESCUE (2026-11-07, Hero: "har music aana chahiye") ----------
 // Ek source fail ho to wahi gaana dusre source se: YT pick fail -> Saavn par
 // wahi gaana (pickSaavnRescue ke sakht mel par hi); Saavn fail -> YT.
@@ -422,8 +445,11 @@ const EXECUTORS = {
   // tap kare to pick wali delivery wahi taiyaar file uthayegi. Fail par
   // dead-nishan (2 fail = list se gayab).
   async music_prefetch(p) {
-    try { await getAudioForVideo(p.videoId, p.title); }
-    catch (e) { await noteDownloadFailure(p.videoId).catch(() => {}); throw e; }
+    try {
+      if (p.scId) await getAudioForScTrack(p.scId, p.url, p.title);
+      else await getAudioForVideo(p.videoId, p.title);
+    }
+    catch (e) { await noteDownloadFailure(p.scId || p.videoId).catch(() => {}); throw e; }
   },
   // Music: vault/disk/cold se audio lao aur WhatsApp par bhejo.
   // Footer rule: audio delivery = footer ON (caption me).
@@ -448,6 +474,14 @@ const EXECUTORS = {
             // RESCUE: wahi gaana YT se lane ki koshish (rescueDeliver)
             try { await rescueDeliver(p); }
             catch { p.url = undefined; p.videoId = null; throw e; } // failure text bina dead-link ke jaye
+          }
+        } else if (p.source === 'soundcloud') {
+          try {
+            await deliverScTrackCloud(p);
+          } catch (e) {
+            // RESCUE: wahi gaana Saavn/YT se (rescueDeliver)
+            try { await rescueDeliver(p); }
+            catch { throw e; }
           }
         } else {
           try {
@@ -485,6 +519,17 @@ const EXECUTORS = {
             p.url = undefined; p.videoId = null;
             throw e;
           }
+        }
+      } else if (p.source === 'soundcloud') {
+        try {
+          const file = await getAudioForScTrack(p.scId || p.videoId, p.url, p.title);
+          await evo.sendPresence(p.instance, p.to, 'recording', 30000).catch(() => {});
+          const b64 = fs.readFileSync(file).toString('base64');
+          await evo.sendMedia(p.instance, p.to, b64, p.title, 'audio', { footer: true });
+        } catch (e) {
+          // RESCUE: wahi gaana Saavn/YT se (rescueDeliver)
+          try { await rescueDeliver(p); }
+          catch { throw e; }
         }
       } else {
         try {
