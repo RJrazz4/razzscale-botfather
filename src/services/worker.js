@@ -5,7 +5,7 @@ import { env } from '../config/env.js';
 import * as evo from './transport.js';
 import * as graph from './graph-cloud.js';
 import * as telegram from './telegram.js';
-import { getAudioForVideo, searchSongs, noteDownloadFailure, initYtdlp, getAudioForScTrack, searchSongsSc } from './music.js';
+import { getAudioForVideo, searchSongs, noteDownloadFailure, initYtdlp, getAudioForScTrack, searchSongsSc, probeDurationSec, isDurationLie, noteDeadPermanent, purgeVault } from './music.js';
 import { getFreshUrl, withQuality, searchSongsSaavn } from './jiosaavn.js';
 import { isSongLength, pickSaavnRescue, pickAltUpload, pickAltUploads, rescueQueryFromTitle } from './musicSearch.js';
 import { markSent } from './musicMemory.js';
@@ -327,21 +327,41 @@ function audioMimeFor(file) {
   return 'audio/mp4'; // .m4a ka WhatsApp-naam
 }
 
+// SACCHAI GATE (2026-11-08, Hero ki clickbait shikayat ki jad): list me
+// likhi lambai aur asal file ki lambai na mile to ye woh gaana NAHI hai jo
+// list ne wada kiya tha — use hamesha ke liye murda karo, uske saare cache
+// (WhatsApp media + Telegram vault) saaf karo, aur throw kar do taaki
+// rescue chain list ke dusre — aksar official — upload par chale. Galat
+// tap par bhi sahi gaana: yahi is gate ka kaam hai.
+async function assertDurationTruth(p, key, file) {
+  if (!p.durationSec) return;
+  const actual = await probeDurationSec(file).catch(() => null);
+  if (isDurationLie(p.durationSec, actual)) {
+    await noteDeadPermanent(key).catch(() => {});
+    await clearWaMediaId(key).catch(() => {});
+    await purgeVault(key).catch(() => {});
+    console.log(`[music] duration-lie pakda: ${key} list=${p.durationSec}s asal=${actual}s — nakli, rescue chalega`);
+    throw new Error('duration_lie');
+  }
+}
+
 async function deliverYtTrackCloud(p, opts = {}) {
-  // Pehla rasta: cache wali media_id — sabse tez, koi download/upload nahi.
+  // File PEHLE lao aur sacchai gate se guzaro — media_id wala tez rasta
+  // bina parkhe nakli file bhi patak deta tha (cache me ghusi 4:06 wali
+  // clickbait baar-baar ja rahi thi). File vault/disk se aati hai to tez
+  // hi rehti hai; gate ke baad hi cache wala rasta khulta hai.
+  const file = await getAudioForVideo(p.videoId, p.title, opts);
+  let size = 0;
+  try { size = fs.statSync(file).size; } catch { throw new Error('yt_cloud_file_missing'); }
+  if (!size || size > WHATSAPP_MAX) throw new Error('yt_cloud_too_large');
+  await assertDurationTruth(p, p.videoId, file);
+  // Cache wali media_id — gate ke baad sabse tez rasta.
   const cached = await getWaMediaId(p.videoId).catch(() => null);
   if (cached) {
     const sent = await graph.sendAudioById(p.to, cached).catch(() => false);
     if (sent) return;
     await clearWaMediaId(p.videoId).catch(() => {}); // id mar gayi — fresh upload par giro
   }
-  // File lao: getAudioForVideo media_vault (Telegram backup) pehle dekhta
-  // hai, warna yt-dlp se download karke vault me bhi rakh deta hai — ek baar
-  // aaya gaana hamesha ke liye backup (Hero ki maang, 2026-11-07).
-  const file = await getAudioForVideo(p.videoId, p.title, opts);
-  let size = 0;
-  try { size = fs.statSync(file).size; } catch { throw new Error('yt_cloud_file_missing'); }
-  if (!size || size > WHATSAPP_MAX) throw new Error('yt_cloud_too_large');
   const mediaId = await graph.uploadMediaFile(file, audioMimeFor(file), path.basename(file));
   if (!mediaId) throw new Error('yt_cloud_upload_failed');
   const sent = await graph.sendAudioById(p.to, mediaId);
@@ -355,16 +375,17 @@ async function deliverYtTrackCloud(p, opts = {}) {
 async function deliverScTrackCloud(p, timeoutMs = 120_000) {
   const scId = p.scId || p.videoId;
   const cacheKey = `sc:${scId}`;
+  const file = await getAudioForScTrack(scId, p.url, p.title, timeoutMs);
+  let size = 0;
+  try { size = fs.statSync(file).size; } catch { throw new Error('sc_cloud_file_missing'); }
+  if (!size || size > WHATSAPP_MAX) throw new Error('sc_cloud_too_large');
+  await assertDurationTruth(p, cacheKey, file);
   const cached = await getWaMediaId(cacheKey).catch(() => null);
   if (cached) {
     const sent = await graph.sendAudioById(p.to, cached).catch(() => false);
     if (sent) return;
     await clearWaMediaId(cacheKey).catch(() => {});
   }
-  const file = await getAudioForScTrack(scId, p.url, p.title, timeoutMs);
-  let size = 0;
-  try { size = fs.statSync(file).size; } catch { throw new Error('sc_cloud_file_missing'); }
-  if (!size || size > WHATSAPP_MAX) throw new Error('sc_cloud_too_large');
   const mediaId = await graph.uploadMediaFile(file, audioMimeFor(file), path.basename(file));
   if (!mediaId) throw new Error('sc_cloud_upload_failed');
   const sent = await graph.sendAudioById(p.to, mediaId);
@@ -380,9 +401,13 @@ async function deliverScTrackCloud(p, timeoutMs = 120_000) {
 // Rescue ke liye: koi YT video dono transport par bhejo — Cloud par media
 // upload wala rasta (deliverYtTrackCloud), Evolution par file/base64 wala.
 async function deliverYtAny(p, videoId, url, opts = {}) {
-  const p2 = { ...p, source: 'yt', videoId, url, songId: undefined };
+  // Duration gate ke liye: asal pick ki apni lambai, rescue wale alt ki
+  // USI ki lambai (altDurs) — dusre ki lambai se naapna galat hoga.
+  const durSec = videoId === p.videoId ? p.durationSec : (p.altDurs?.[videoId] ?? undefined);
+  const p2 = { ...p, source: 'yt', videoId, url, songId: undefined, durationSec: durSec };
   if (p.instance === evo.CLOUD_INSTANCE) { await deliverYtTrackCloud(p2, opts); return; }
   const file = await getAudioForVideo(videoId, p.title, opts);
+  await assertDurationTruth(p2, videoId, file);
   await evo.sendPresence(p.instance, p.to, 'recording', 30000).catch(() => {});
   const b64 = fs.readFileSync(file).toString('base64');
   await evo.sendMedia(p.instance, p.to, b64, p.title, 'audio', { footer: true });
@@ -392,6 +417,7 @@ async function deliverScAny(p, scTrack, timeoutMs = 120_000) {
   const p2 = { ...p, source: 'soundcloud', scId: scTrack.id, videoId: undefined, url: scTrack.url };
   if (p.instance === evo.CLOUD_INSTANCE) { await deliverScTrackCloud(p2, timeoutMs); return; }
   const file = await getAudioForScTrack(scTrack.id, scTrack.url, scTrack.title, timeoutMs);
+  await assertDurationTruth({ ...p, durationSec: Number(scTrack.durationSec || scTrack.duration) || undefined }, `sc:${scTrack.id}`, file);
   await evo.sendPresence(p.instance, p.to, 'recording', 30000).catch(() => {});
   const b64 = fs.readFileSync(file).toString('base64');
   await evo.sendMedia(p.instance, p.to, b64, p.title, 'audio', { footer: true });
