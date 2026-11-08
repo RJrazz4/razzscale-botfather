@@ -290,6 +290,42 @@ function ensureDeadTable() {
   }
   return deadTableReady;
 }
+// File ki ASAL lambai (seconds) — ffmpeg ke -i wale dump se. ffprobe alag
+// binary hai jo hamare paas pakka nahi; ffmpeg-static pakka hai.
+export async function probeDurationSec(file) {
+  try {
+    await run(FFMPEG, ['-i', file], { timeout: 15_000 });
+  } catch (e) {
+    const m = /Duration: (\d+):(\d+):(\d+(?:\.\d+)?)/.exec(String(e?.stderr || ''));
+    if (m) return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+    throw e;
+  }
+  return null;
+}
+// SACCHAI NAAP: list me likhi lambai aur asal file ki lambai me 45s se
+// zyada ka farak = clickbait (title kuch aur, andar kuch aur). Data ghayab
+// ho (0/null) to jhooth NAHI — naap hi nahi lagi.
+export function isDurationLie(listedSec, actualSec) {
+  const l = Number(listedSec) || 0, a = Number(actualSec) || 0;
+  if (!l || !a) return false;
+  return Math.abs(l - a) > 45;
+}
+// Clickbait ke liye HAMESHA ka murda-nishan (fails=99 — 6-ghante wali
+// muddat is par lagu nahi; jhoothi pehchan kabhi purani nahi hoti).
+export async function noteDeadPermanent(videoId) {
+  if (!videoId) return;
+  await ensureDeadTable();
+  await pool.query(
+    `insert into music_dead (video_id, fails, updated_at) values ($1, 99, $2)
+     on conflict (video_id) do update set fails = 99, updated_at = excluded.updated_at`,
+    [videoId, new Date().toISOString()]);
+}
+// Vault se ek video ka backup saaf (nakli file ka backup bhi nakli hai).
+export async function purgeVault(videoId) {
+  if (!videoId) return;
+  await pool.query('delete from media_vault where video_id=$1', [videoId]).catch(() => {});
+}
+
 export async function noteDownloadFailure(videoId) {
   if (!videoId) return;
   await ensureDeadTable();
@@ -309,7 +345,7 @@ export async function deadVideoIds(ids) {
   // khoj se gayab kar deta tha. 6 ghante purana nishan = ek aur mauka.
   const cutoff = new Date(Date.now() - 6 * 3600_000).toISOString();
   const { rows } = await pool.query(
-    `select video_id from music_dead where fails >= 2 and updated_at > $${list.length + 1} and video_id in (${ph})`, [...list, cutoff]);
+    `select video_id from music_dead where (fails >= 50 or (fails >= 2 and updated_at > $${list.length + 1})) and video_id in (${ph})`, [...list, cutoff]);
   return new Set(rows.map((r) => r.video_id));
 }
 
