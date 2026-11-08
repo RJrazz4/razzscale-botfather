@@ -303,8 +303,13 @@ export async function deadVideoIds(ids) {
   if (!list.length) return new Set();
   await ensureDeadTable();
   const ph = list.map((_, i) => `$${i + 1}`).join(',');
+  // MURDA-NISHAN KI MUDDAT (2026-11-08): fails ke saath WAQT bhi dekho —
+  // server ki YouTube-deewaar (environment ki galti) par har video fail
+  // hota hai; bina muddat ke woh nishan official gaano ko HAMESHA ke liye
+  // khoj se gayab kar deta tha. 6 ghante purana nishan = ek aur mauka.
+  const cutoff = new Date(Date.now() - 6 * 3600_000).toISOString();
   const { rows } = await pool.query(
-    `select video_id from music_dead where fails >= 2 and video_id in (${ph})`, list);
+    `select video_id from music_dead where fails >= 2 and updated_at > $${list.length + 1} and video_id in (${ph})`, [...list, cutoff]);
   return new Set(rows.map((r) => r.video_id));
 }
 
