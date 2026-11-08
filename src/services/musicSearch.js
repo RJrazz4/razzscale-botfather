@@ -24,6 +24,29 @@ export function isSongLength(track) {
 const MAJOR_CHANNEL_WORDS = ['t series', 'tseries', 'sony music', 'jee music', 'zee music', 'yrf', 'tips official', 'tips', 'saregama', 'universal music', 'warner music', 'aditya music', 'lahari', 'venus', 'eros', 'times music', 'speed records', 'geet mp3', 'white hill', 'hitz music', 'vyrl', 'lahari music'];
 const PENALTY_WORDS = ['lofi', 'slowed', 'reverb', '8d', 'nightcore', 'karaoke', 'instrumental', 'ringtone', 'cover', 'flute', 'violin', 'bhakti', 'reaction', 'ai version', 'dj mix', 'dj remix', 'status video', 'whatsapp status'];
 
+// Halki spelling-sahishnuta (musicMemory ke tokenMatch jaisi): zaroorat ~
+// jarurat jaise mel ke liye — barabar, andar-shaamil, ya chhota lev farak.
+function levDist(a, b) {
+  const m = a.length, n = b.length;
+  if (Math.abs(m - n) > 2) return 99;
+  const row = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    let prev = row[0]; row[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const cur = row[j];
+      row[j] = Math.min(row[j] + 1, row[j - 1] + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1));
+      prev = cur;
+    }
+  }
+  return row[n];
+}
+function looseTokenEq(a, b) {
+  if (a === b) return true;
+  if (a.length >= 4 && b.length >= 4 && (a.includes(b) || b.includes(a))) return true;
+  const d = levDist(a, b);
+  return (a.length >= 5 && d <= 1) || (a.length >= 9 && d <= 2);
+}
+
 export function scoreYtTrack(track, query, position = 0, total = 8) {
   const titleF = foldText(track.title || '');
   const channelF = foldText(track.channel || '');
@@ -48,7 +71,7 @@ export function scoreYtTrack(track, query, position = 0, total = 8) {
     const qD = distinctiveWords(query).map((w) => looseFold(w));
     const firstSeg = (track.title || '').split('|')[0].split(' - ')[0];
     const tD = distinctiveWords(firstSeg).map((w) => looseFold(w));
-    const segMatch = tD.length > 0 && tD.every((w) => qD.some((qw) => qw === w || (qw.length >= 4 && w.length >= 4 && (qw.includes(w) || w.includes(qw)))));
+    const segMatch = tD.length > 0 && tD.every((w) => qD.some((qw) => looseTokenEq(qw, w)));
     if (segMatch && majorCh) score += 3.5;
   }
   // Halki views-sazaa (2026-11-07 raat): bade label ke bina aur 50,000 se
@@ -204,11 +227,23 @@ export async function searchMusicMerged(query, limit = 8, opts = {}) {
     const ytIds = final.filter((t) => t.source !== 'jiosaavn').map((t) => t.id).filter(Boolean);
     if (ytIds.length) {
       const dead = await deadVideoIds(ytIds);
-      if (dead.size) final = final.filter((t) => t.source === 'jiosaavn' || !dead.has(t.id));
+      if (dead.size) {
+        // Bade label ke official upload ko murda-nishan par MAT hatao —
+        // deewaar ke samay wohi sabse zyada fail hote hain, par wohi asli
+        // hain; rescue chain unhe phir parkhegi. Baaki par filter lage.
+        const isMajorYt = (t) => {
+          const cf = foldText(t.channel || '');
+          return MAJOR_CHANNEL_WORDS.some((w) => cf.includes(w)) || /-\s*topic$/.test(cf) || cf.endsWith(' topic');
+        };
+        const removed = final.filter((t) => t.source !== 'jiosaavn' && dead.has(t.id) && !isMajorYt(t)).map((t) => t.id);
+        if (removed.length) console.log(`[music-search] dead-filter hataye: ${removed.join(', ')}`);
+        final = final.filter((t) => t.source === 'jiosaavn' || !dead.has(t.id) || isMajorYt(t));
+      }
     }
   } catch { /* upar likha hai — search nahi rukegi */ }
   // LOG (2026-11-07 raat): har khoj ka antim kram log me — "nahi aa raha"
   // wali shikayat par ab andhere me teer nahi chalega; pool khud bolega.
+  console.log(`[music-search] pool: ${pool.slice(0, 12).map((e) => `${e.track.source}:${e.track.id}(${Math.round(e.score * 10) / 10})`).join(' ')}`);
   console.log(`[music-search] q="${query}" strict=${!!opts.strict} top: ${final.map((t, i) => `${i + 1})${t.source}:${(t.title || t.song || '').slice(0, 40)}(${t._score ?? '?'})`).join(' ')}`);
   return final;
 }
