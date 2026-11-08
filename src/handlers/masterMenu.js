@@ -425,6 +425,12 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
           altIds: (results || [])
             .filter((r) => r && r.id && r.id !== pick.id && r.source !== 'jiosaavn' && r.source !== 'soundcloud' && isSongLength(r))
             .slice(0, 3).map((r) => r.id),
+          // Sacchai gate ke liye lambaiyaan: pick ki apni, aur har alt ki
+          // usi ki (worker delivery par asal file se naapega).
+          durationSec: Number(pick.durationSec || pick.duration) || undefined,
+          altDurs: Object.fromEntries((results || [])
+            .filter((r) => r && r.id && r.source !== 'jiosaavn' && r.source !== 'soundcloud' && Number(r.durationSec || r.duration) > 0)
+            .map((r) => [r.id, Number(r.durationSec || r.duration)])),
           url: pick.source === 'jiosaavn' ? undefined : pick.url },
         `music:${msgId || `${user.id}:${pick.id}:${Date.now()}`}`);
       // SMART MUSIC MEMORY: pick history me likho (repeat detection ki neev).
