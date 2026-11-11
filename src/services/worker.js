@@ -711,8 +711,23 @@ const EXECUTORS = {
     if (!isWeb) await evo.sendPresence(p.instance, p.to, 'composing', 15000).catch(() => {});
     const out = await workWrite({ id: p.userId }, { kind: p.workKind, brief: p.brief });
     if (!out) {
-      if (isWeb) await notifyOwner(p.instance, `⚠️ *Web order ${p.orderId} nahi ban paya*\n👤 +${p.to}\n📝 ${p.workKind}: "${String(p.brief || '').slice(0, 140)}"\nCustomer ko khabar nahi gayi — chaho to WhatsApp par haath se baat kar lo.`).catch(() => {});
-      else await evo.sendText(p.instance, p.to, 'Maaf karo, ye kaam abhi nahi ban paya 😔 — thodi der me dobara try karo, ya VIP section se Boss se baat kar lo.');
+      // HONEST-LOUD FAIL (2026-11-11, SELF-AUDIT FIX 2): workWrite null ka
+      // matlab hai likhai banane wala LLM jawab nahi de raha. Jad code me
+      // NAHI hai — job ki wiring (payload/imports) sahi hai; asal wajah ye
+      // hai ki env me koi CHALTI hui LLM key hi nahi hai (LLM_API_KEY
+      // Render par kabhi set nahi hua / maujooda key invalid hai). Key
+      // theek hue bina HAR likhai order yahin marega — isliye fail ab
+      // CHUP nahi rahega: zor se log + Boss ko har fail par khabar, wajah
+      // ke saath. (Pehle WhatsApp orders par Boss ko khabar hi nahi jati
+      // thi — order chup-chaap mar jata tha; web par hi alert tha.)
+      const reason = !env.llmKeys.length
+        ? 'env me koi LLM key set hi nahi hai (LLM_API_KEY / OPENROUTER_API_KEY khaali)'
+        : 'saare LLM providers jawab dene me fail — key invalid/expired ya daily limit (server log me "[llm] failed" lines dekho)';
+      console.error(`[likhai] ORDER FAIL ${p.orderId} (${isWeb ? 'web' : 'whatsapp'}): workWrite null — ${reason}`);
+      await notifyOwner(p.instance,
+        `⚠️ *Likhai order ${p.orderId} NAHI ban paya* (${isWeb ? 'website' : 'WhatsApp'} order)\n👤 +${p.to}\n📝 ${p.workKind}: "${String(p.brief || '').slice(0, 140)}"\n🧠 Wajah: ${reason}\nJab tak Render env me chalti hui LLM key nahi lagti, har likhai order aise hi fail hoga. Customer ko ${isWeb ? 'khabar nahi gayi — WhatsApp par haath se baat kar lo.' : '"nahi ban paya" bol diya hai — chaho to khud baat kar lo.'}`)
+        .catch(() => {});
+      if (!isWeb) await evo.sendText(p.instance, p.to, 'Maaf karo, ye kaam abhi nahi ban paya 😔 — thodi der me dobara try karo, ya VIP section se Boss se baat kar lo.');
       return;
     }
     if (out.startsWith('CLARIFY:')) {
