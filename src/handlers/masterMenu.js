@@ -229,6 +229,85 @@ function cleanSearchQuery(q) {
   return kept.length ? kept.join(' ') : q;
 }
 
+// ---------- INTENT GUARD (2026-11-11, SELF-AUDIT FIX 1) ----------
+// Shikayat pakki nikli thi: menu par likha har chhota text gaana-search ban
+// jata tha — sawal, service ki maang, aam baat-cheet, sab. Ye helper PURE
+// RULES hai (koi LLM call nahi) taaki dimag (LLM key) band ho tab bhi niyam
+// waisa ka waisa chale. Faisla ek shabd me: 'music' | 'service' |
+// 'question' | 'sentence' | 'smalltalk' | 'song'. Kram hi niyam hai —
+// pehla match jeet-ta hai. (Design: SELF-AUDIT-2026-11-11.md §4.)
+const MUSIC_NOUNS = ['gaana', 'gana', 'geet', 'song', 'songs', 'music'];
+const QUESTION_WORDS = new Set([
+  // purani chhoti list + audit §1.3 ki chhooti hui spellings/forms + English
+  'kya', 'kaise', 'kaisi', 'kaisa', 'kitna', 'kitne', 'kitni',
+  'kyon', 'kyu', 'kyun', 'kab', 'kahan', 'kidhar', 'kaun', 'kis', 'kisko',
+  'how', 'what', 'why', 'when', 'where', 'who', 'which',
+]);
+const SERVICE_WORDS = new Set([
+  'bot', 'website', 'site', 'app', 'apps', 'automation', 'price', 'rate',
+  'fees', 'fee', 'charge', 'charges', 'daam', 'kharcha', 'paisa', 'paise',
+  'order', 'booking', 'madad', 'help', 'problem', 'dikkat', 'error',
+  'complaint', 'shikayat', 'service', 'services', 'kaam', 'business',
+]);
+const SERVICE_PHRASES = ['bana do', 'banwa do', 'banana hai', 'banani hai', 'banwana hai', 'banwana', 'karwa do', 'karwana hai', 'karwao', 'karwa', 'banwa'];
+// Vakya ke nishan — gaane ka NAAM ek noun-phrase hota hai, ye shabd usme
+// aam taur par nahi hote; ye dikhe to woh baat-cheet hai, naam nahi.
+const SENTENCE_WORDS = new Set([
+  'hai', 'hain', 'ho', 'tha', 'thi', 'mera', 'meri', 'mujhe', 'tum', 'aap',
+  'nahi', 'nahin', 'raha', 'rahi', 'batao', 'milega', 'milta', 'hoga',
+]);
+const SMALLTALK = new Set([
+  'thank you', 'thanks', 'shukriya', 'dhanyavaad', 'ok', 'okay', 'theek hai',
+  'accha', 'badhiya', 'nice', 'great', 'good morning', 'good afternoon',
+  'good evening', 'good night', 'bye', 'alvida', 'call me',
+]);
+export function classifyFreeText(t, lower) {
+  const text = String(t || '').trim();
+  const lowText = String(lower || text.toLowerCase()).replace(/\s+/g, ' ');
+  // Shabd saaf karke (kinare ke viraam-chinh hata kar) taaki 'kyun?' bhi 'kyun' bane
+  const words = lowText.split(' ').filter(Boolean)
+    .map((w) => w.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '')).filter(Boolean);
+  const hasWord = (set) => words.some((w) => set.has(w));
+  // 1. MUSIC NOUN — gaane ki saaf maang KABHI nahi rukti (jaisa aaj hota hai)
+  if (words.some((w) => MUSIC_NOUNS.includes(w))) return 'music';
+  // 2. QUESTION — '?' ya sawal-shabd
+  if (text.includes('?') || hasWord(QUESTION_WORDS)) return 'question';
+  // 3. SERVICE — service-shabd, banwane wali phrase, ya 'chahiye' + koi
+  //    asal noun ('mujhe X chahiye' wali maang; 'bot chahiye' shabd se hi
+  //    pakda jata hai, ye clause 'poster chahiye' jaise shabdon ke liye hai)
+  if (hasWord(SERVICE_WORDS) || SERVICE_PHRASES.some((p) => lowText.includes(p))
+    || (words.includes('chahiye') && words.some((w) => w !== 'chahiye' && !SENTENCE_WORDS.has(w) && !QUESTION_WORDS.has(w)))) return 'service';
+  // 4. SENTENCE — 4+ shabd aur vakya ke nishan = baat-cheet, gaane ka naam nahi
+  if (words.length >= 4 && hasWord(SENTENCE_WORDS)) return 'sentence';
+  // 5. SMALLTALK — poora text hi shishtachar hai
+  if (SMALLTALK.has(lowText)) return 'smalltalk';
+  // 6. Bacha hua chhota naam-phrase hi gaane ka naam mana jayega (caller
+  //    lambai ki hadd lagata hai)
+  return 'song';
+}
+
+// Non-music text ka bandha rasta (teeno gates ka saanjha):
+// service = tap-driven VIP consultation (bina dimag ke chalti hai, confirm
+// par Boss ko khabar); sawal = ek saaf line + home menu; vakya/smalltalk =
+// home menu. QUESTION/SENTENCE par state 'menu' hi rehta hai — agla message
+// taaza parkha jayega, ai_chat wale jaal me koi nahi fasa. Music states se
+// aaye ho (Gate 2/3) to pehle music state se bahar (exitMusicState).
+async function routeNonMusicText(ctx, kind, { exitMusicState = false } = {}) {
+  const { user, from, inst } = ctx;
+  if (exitMusicState) await setFlow(user.id, 'master', { step: 'menu', lastTitle: ctx.flow?.lastTitle }, FLOW_TTL);
+  if (kind === 'service') {
+    await evo.sendText(inst, from, 'Theek hai — ye service wala kaam hai, Boss wala rasta khol raha hoon 👇');
+    return handleConsult({ ...ctx, t: 'vip', lower: 'vip', state: 'menu' });
+  }
+  if (kind === 'question') {
+    await evo.sendText(inst, from, 'Sawal ke liye menu se *Free AI Chat* ya *VIP Automation* chuno — ya *boss se baat karao* likho, Boss khud jawab denge. 👇');
+  } else if (kind === 'smalltalk') {
+    await evo.sendText(inst, from, 'Bahut dhanyavaad! 🙏 Gaana sunna ho to naam likh do, aur kuch karwana ho to menu se chuno.');
+  }
+  await sendHomeMenu(inst, from, user.id);
+  return true;
+}
+
 // Category/typed search ka common pipeline: ack -> search -> pick state ya empty state
 async function runMusicSearch(ctx, query, fromKind) {
   const { user, from, inst, flow } = ctx;
@@ -443,7 +522,12 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
     // likha hai to woh NAYI khoj hai (2026-11-07, Hero: "har option par bhi
     // search karne se gaana milega"). Escape shabd (menu/greeting/lyrics)
     // neeche ke flows ke liye chhode hain — wohi purane raste chalenge.
+    // INTENT GUARD — GATE 2 (2026-11-11, audit §1.2 Point B): sawal,
+    // service ki maang ya aam baat yahan BHI gaana-search nahi banegi —
+    // woh music state se bahar nikal kar apne sahi raste jayegi.
     if (t && !['hi', 'hii', 'hello', 'hey', 'menu', 'start', 'namaste', 'lyrics'].includes(lower)) {
+      const kind = classifyFreeText(t, lower);
+      if (kind !== 'song' && kind !== 'music') { await routeNonMusicText(ctx, kind, { exitMusicState: true }); return; }
       await runMusicSearch(ctx, t, 'search');
       return;
     }
@@ -511,8 +595,16 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
       await runMusicSearch(ctx, CATEGORIES[catId].query, 'category');
       return;
     }
-    // kuch aur likha = seedha gaana search maan lo (zone se typed naam bhi chalega)
-    if (t) { await runMusicSearch(ctx, t, 'search'); return; }
+    // kuch aur likha = aam taur par seedha gaana search (zone se typed naam
+    // bhi chalega) — par INTENT GUARD — GATE 3 (2026-11-11, audit §1.2
+    // Point C): sawal/service/aam baat yahan bhi search nahi banegi; woh
+    // music state se bahar nikal kar apne sahi raste jayegi.
+    if (t) {
+      const kind = classifyFreeText(t, lower);
+      if (kind !== 'song' && kind !== 'music') { await routeNonMusicText(ctx, kind, { exitMusicState: true }); return; }
+      await runMusicSearch(ctx, t, 'search');
+      return;
+    }
     await sendMusicZone(inst, from);
     return;
   }
@@ -644,26 +736,48 @@ export async function handleMasterMessage({ user, from, text, pushName, msgId, c
   // shuru karo. Pakad abhi pakke shabdon se (music); baaki baatein neeche
   // AI brain ko jati hain.
   if (state === 'menu' && t) {
-    const musicWord = ['music', 'gaana', 'gana', 'song', 'songs', 'geet'].some((w) => t.includes(w));
-    const listenVerb = ['sunna', 'sunao', 'suna do', 'chahiye', 'chalao', 'bajao', 'lagao', 'play'].some((w) => t.includes(w));
+    // Pakke entry-shabd — case ke saath bhi (audit §1.3/§3-9: 'VIP' bade
+    // aksharon me likhne par consult ki jagah gaana-search khul jata tha;
+    // 'kaam karwao' shabdon me likhne par bhi wahi haal tha).
+    if (lower === 'vip') { await handleConsult({ ...ctx, t: 'vip' }); return; }
+    if (lower === 'work' || lower.includes('kaam karwao')) { await handleWork({ ...ctx, t: 'work' }); return; }
+    // MUSIC-INTENT (FIX, audit §1.4): music-shabd + sunne ki kriya, ya sirf
+    // music-shabd wali chhoti maang → seedha Music Zone. Purana code flow
+    // scope 'music' me (jo koi padhta hi nahi) ghayab step 'music_home'
+    // likhta tha aur sendMusicZone(ctx) galat arguments se bulata tha —
+    // net asar: "mujhe music sunna hai" par KHAMOSHI. Ab: music-shabd
+    // LOWERCASE par parkha jata hai (capital 'Music' pehle fisal jata tha),
+    // state 'master' scope me asal step 'music_zone', aur
+    // sendMusicZone(inst, from) — baaki har jagah wala sahi tareeka.
+    const mWords = lower.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+    const musicWord = MUSIC_NOUNS.some((w) => mWords.includes(w));
+    const listenVerb = ['sunna', 'sunao', 'suna do', 'chahiye', 'chalao', 'bajao', 'lagao', 'play'].some((w) => lower.includes(w));
     if (musicWord && (listenVerb || t.split(/\s+/).length <= 3)) {
-      await setFlow(user.id, 'music', { step: 'music_home' });
-      await sendMusicZone(ctx);
+      await setFlow(user.id, 'master', { step: 'music_zone', lastTitle: flow?.lastTitle }, FLOW_TTL);
+      await sendMusicZone(inst, from);
       return;
     }
     // NANGA GAANA-NAAM (2026-11-07 raat, Hero ki live report): user menu par
-    // seedha gaane ka naam likh de ("Mujhe Teri jarurat hai") to woh AI chat
-    // nahi, gaana hi hai — bot ka sabse bada kaam yahi hai, aur dimag (LLM)
-    // atka ho to bhi gaana milna chahiye. Sawal/service wale shabd hon to
-    // ye andaz NAHI lagega — woh neeche agent wale raste par jayenge.
-    const lw = lower.split(/\s+/).filter(Boolean);
-    const hintHit = lower.includes('?')
-      || ['bot banana', 'band hai', 'nahi ho'].some((p) => lower.includes(p))
-      || ['kya', 'kaise', 'kitna', 'kitne', 'kyon', 'kyu', 'kab', 'price', 'daam', 'website', 'automation', 'madad', 'help', 'problem', 'dikkat', 'error'].some((w) => lw.includes(w));
-    if (!hintHit && lw.length >= 1 && lw.length <= 8) {
-      await runMusicSearch(ctx, t, 'search');
+    // seedha gaane ka naam likh de ("Zaroorat") to woh AI chat nahi, gaana
+    // hi hai — bot ka sabse bada kaam yahi hai, aur dimag (LLM) atka ho to
+    // bhi gaana milna chahiye. Par INTENT GUARD — GATE 1 (2026-11-11,
+    // audit §1.2 Point A): search sirf woh text banega jise
+    // classifyFreeText gaane ka naam mane; sawal/service/vakya/smalltalk
+    // apne bandhe raste jayenge, gaana bankar kabhi nahi ghumenge. Naam
+    // ki lambai-hadd ab 6 shabd (pehle 8 thi — design §4.2 rule 6).
+    const kind = classifyFreeText(t, lower);
+    if (kind === 'song') {
+      const lw = lower.split(/\s+/).filter(Boolean);
+      if (lw.length >= 1 && lw.length <= 6) {
+        await runMusicSearch(ctx, t, 'search');
+        return;
+      }
+    } else if (kind !== 'music') {
+      await routeNonMusicText(ctx, kind);
       return;
     }
+    // kind 'music' (sunne ki kriya ke bina lambi music-baat) ya 6+ shabd ka
+    // naam-phrase → neeche Default Agent Mode (purana vyavhaar barkarar).
   }
 
   // ===== Default: AGENT MODE (2026-11-06, Hero ka order: "har page par agentic") =====
